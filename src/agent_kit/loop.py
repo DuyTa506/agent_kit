@@ -3,19 +3,30 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 from uuid import uuid4
 
 from .compaction import build_compaction_event, maybe_compact, run_forced_compaction
+from .context import (
+    ContextBuildResult,
+    ContextBuildTurn,
+    apply_context_budget,
+    context_budget_to_dict,
+    normalize_context_builder,
+)
 from .errors import AbortError, ContextLengthError
 from .events import (
     AssistantEvent,
+    ContextBuildEvent,
     ErrorEvent,
     Event,
+    LoopGuardEvent,
     PartialAssistantEvent,
     ResultEvent,
     SkillsLoadedEvent,
     SystemEvent,
     ToolCallEndEvent,
+    ToolCallStartEvent,
     UsageEvent,
     UserEvent,
 )
@@ -79,52 +90,84 @@ def _re_inject_skill_context(session: Session) -> None:
         session.provider_view.append(Message(role="user", content=[TextBlock(text=text)]))
 
 
-async def _run_context_injectors(
-    session: Session,
-    turn_index: int,
-    extra_system: list,
-) -> None:
-    """Fire all registered context injectors for the current turn."""
-    from .context_hooks import TurnContext
-
+async def _build_context_result(session: Session, turn_index: int) -> ContextBuildResult | None:
     agent = session.agent
-    if not agent.context_injectors:
-        return
+    builder = normalize_context_builder(getattr(agent, "context_builder", None))
+    if builder is None:
+        return None
 
-    ctx = TurnContext(
+    turn = ContextBuildTurn(
         session=session,
-        provider_view=session.provider_view,
+        messages=list(session.provider_view),
         turn_index=turn_index,
         deps=getattr(session, "run_deps", None),
-        extra_system=extra_system,
+        model=agent.model,
+        tools=getattr(session, "tools_override", None) or agent.tools,
+        token_estimator=getattr(agent, "token_estimator", None),
     )
-    for injector in agent.context_injectors:
-        await injector.before_turn(ctx)
+    result = await builder.build(turn)
+    return apply_context_budget(
+        result,
+        estimator=getattr(agent, "token_estimator", None),
+        model=agent.model,
+    )
+
+
+def apply_provider_capabilities(req: ProviderRequest, caps: Any) -> ProviderRequest:
+    """Downgrade *req* fields to match what *caps* says the provider supports.
+
+    * ``prompt_cache=False`` → clears ``req.cache_prompt`` and
+      ``req.cache_ttl`` so providers that ignore caching don't receive dead
+      flags (fixes current dead-plumbing where every request sends
+      ``cache_prompt=True`` regardless of provider).
+    * ``tool_choice=False`` → clears ``req.tool_choice``.
+    * ``structured_output=False`` → clears ``req.output_schema``; the loop
+      still text-parses using ``opts/agent.output_schema`` at
+      :func:`run_loop` line ~452, so the host's intent is preserved.
+    * ``parallel_tool_calls`` is informational and has no ``req`` field yet.
+
+    Modifies *req* in place and returns it.
+    """
+    if not caps.prompt_cache:
+        req.cache_prompt = None
+        req.cache_ttl = None
+    if not caps.tool_choice:
+        req.tool_choice = None
+    if not caps.structured_output:
+        req.output_schema = None
+    return req
 
 
 def _build_turn_request(
     session: Session,
     opts: RunOptions,
     *,
-    extra_system: list | None = None,
+    context: ContextBuildResult | None = None,
     model_override: str | None = None,
 ) -> ProviderRequest:
     """Build the :class:`ProviderRequest` for one provider call.
 
     Collapses the two near-identical request builders (normal path and
-    ContextLengthError retry path) into one place.
+    ContextLengthError retry path) into one place.  Applies provider
+    capability downgrades before returning.
     """
     agent = session.agent
 
     base_system = list(session.system_blocks_override or agent.system_blocks)
-    if extra_system:
-        base_system = base_system + list(extra_system)
+    if context and context.system_blocks:
+        base_system = base_system + list(context.system_blocks)
 
-    return ProviderRequest(
+    messages = list(session.provider_view)
+    if context and context.messages:
+        messages.extend(context.messages)
+
+    tools = _select_context_tools(session, context)
+
+    req = ProviderRequest(
         model=model_override or agent.model,
         system=base_system,
-        tools=(session.tools_override or agent.tools).schemas(),
-        messages=session.provider_view,
+        tools=tools.schemas(),
+        messages=messages,
         max_output_tokens=opts.max_output_tokens or agent.max_output_tokens,
         temperature=opts.temperature,
         thinking=opts.thinking,
@@ -135,6 +178,59 @@ def _build_turn_request(
         cache_ttl=agent.cache_ttl,
         cache_prompt=True,
     )
+
+    # Apply provider capability downgrades (e.g. clear cache_prompt for
+    # providers that don't support it, strip output_schema when the
+    # provider has no native structured output, etc.).
+    if hasattr(agent.provider, "capabilities"):
+        caps = agent.provider.capabilities(req.model)
+        apply_provider_capabilities(req, caps)
+
+    return req
+
+
+def _select_context_tools(session: Session, context: ContextBuildResult | None) -> Any:
+    registry = session.tools_override or session.agent.tools
+    if context is None or context.selected_tools is None:
+        return registry
+
+    selected = context.selected_tools
+    if hasattr(selected, "schemas") and hasattr(selected, "get"):
+        return selected
+    if isinstance(selected, str):
+        return registry.select(names={selected})
+    if isinstance(selected, dict):
+        names = selected.get("names")
+        tags = selected.get("tags")
+        return registry.select(
+            names={str(name) for name in names} if isinstance(names, (list, set, tuple)) else None,
+            tags={str(tag) for tag in tags} if isinstance(tags, (list, set, tuple)) else None,
+        )
+    if isinstance(selected, (list, set, tuple)):
+        return registry.select(names={str(name) for name in selected})
+    return registry
+
+
+def _context_selected_tool_names(context: ContextBuildResult | None) -> list[str] | None:
+    if context is None or context.selected_tools is None:
+        return None
+    selected = context.selected_tools
+    if hasattr(selected, "list"):
+        return sorted(tool.name for tool in selected.list())
+    if isinstance(selected, str):
+        return [selected]
+    if isinstance(selected, dict):
+        names = selected.get("names")
+        tags = selected.get("tags")
+        parts: list[str] = []
+        if isinstance(names, (list, set, tuple)):
+            parts.extend(str(name) for name in names)
+        if isinstance(tags, (list, set, tuple)):
+            parts.extend(f"tag:{tag}" for tag in tags)
+        return sorted(parts)
+    if isinstance(selected, (list, set, tuple)):
+        return sorted(str(name) for name in selected)
+    return None
 
 
 def _parse_structured_output(text: str, schema: object) -> tuple[dict | None, str | None]:
@@ -248,11 +344,44 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
     started = time.time()
     total = Usage()
 
+    # ── Observability hub ─────────────────────────────────────────────────
+    from .observability import ObserverDispatcher
+    from .observability import ProviderCallInfo as _ProviderCallInfo
+    from .observability import ProviderCallResult as _ProviderCallResult
+    from .observability import RunInfo as _RunInfo
+    from .observability import RunResultInfo as _RunResultInfo
+    from .observability import ToolInfo as _ToolInfo
+    from .observability import ToolResultInfo as _ToolResultInfo
+    from .observability import TurnInfo as _TurnInfo
+
+    hub = ObserverDispatcher(getattr(agent, "observers", None))
+
     # Resolve per-run deps: RunOptions.deps wins over Agent.deps
     session.run_deps = opts.deps if opts.deps is not None else getattr(agent, "deps", None)
 
     # Resolve final_tool_name: RunOptions wins over Agent
     effective_final_tool = opts.final_tool_name or getattr(agent, "final_tool_name", None)
+
+    # Loop guard — detects repeated identical tool calls and consecutive
+    # failure streaks.  On by default (Agent sets self.loop_guard = LoopGuard()
+    # unless the caller passes loop_guard=None).
+    from .loop_guard import LoopGuardState, evaluate_loop_guard
+
+    _guard = getattr(agent, "loop_guard", None)
+    _guard_state = LoopGuardState() if _guard is not None else None
+    _force_final_pending = False
+
+    if hub.active:
+        await hub.dispatch(
+            "on_run_start",
+            _RunInfo(
+                run_id=run_id,
+                session_id=session.id,
+                model=agent.model,
+                prompt=prompt,
+                tools=tuple(sorted(tool.name for tool in agent.tools.list())),
+            ),
+        )
 
     yield SystemEvent(
         session_id=session.id,
@@ -293,9 +422,60 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
 
     max_turns = int(agent.max_turns) if isinstance(agent.max_turns, int) else 10**9
     signal = session._abort_controller
+    _final_result: _RunResultInfo | None = None
+    _active_turn_index: int | None = None
+    _active_provider_call: tuple[int, str, float] | None = None
+
+    async def _start_turn(turn_index: int) -> None:
+        nonlocal _active_turn_index
+        if hub.active:
+            await hub.dispatch("on_turn_start", _TurnInfo(run_id=run_id, turn_index=turn_index))
+            _active_turn_index = turn_index
+
+    async def _end_active_turn() -> None:
+        nonlocal _active_turn_index
+        if not hub.active or _active_turn_index is None:
+            return
+        turn_index = _active_turn_index
+        _active_turn_index = None
+        await hub.dispatch("on_turn_end", _TurnInfo(run_id=run_id, turn_index=turn_index))
+
+    async def _start_provider_call(turn_index: int, model: str) -> None:
+        nonlocal _active_provider_call
+        started_at = time.perf_counter()
+        if hub.active:
+            await hub.dispatch(
+                "on_provider_call_start",
+                _ProviderCallInfo(run_id=run_id, turn_index=turn_index, model=model),
+            )
+            _active_provider_call = (turn_index, model, started_at)
+
+    async def _end_active_provider_call(*, stop_reason: str, usage: Usage | None = None) -> None:
+        nonlocal _active_provider_call
+        if not hub.active or _active_provider_call is None:
+            return
+        turn_index, model, started_at = _active_provider_call
+        _active_provider_call = None
+        await hub.dispatch(
+            "on_provider_call_end",
+            _ProviderCallResult(
+                run_id=run_id,
+                turn_index=turn_index,
+                model=model,
+                stop_reason=stop_reason,
+                usage=usage or Usage(),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            ),
+        )
+
+    async def _close_active_observer_spans(*, stop_reason: str = "error") -> None:
+        await _end_active_provider_call(stop_reason=stop_reason)
+        await _end_active_turn()
+
     try:
         for turn_index in range(max_turns):
             throw_if_aborted(signal)
+            await _start_turn(turn_index)
             session.compaction_retry_used_this_turn = False
 
             pending = session.pending_skill_overlay
@@ -311,15 +491,30 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                 yield build_compaction_event(session)
                 _re_inject_skill_context(session)
 
-            # ── Context injection (RAG-per-turn, schema injection, …) ─────
-            extra_system: list = []
-            await _run_context_injectors(session, turn_index, extra_system)
+            # ── Context building (RAG-per-turn, schema injection, …) ──────
+            context_result = await _build_context_result(session, turn_index)
+            if context_result is not None:
+                yield ContextBuildEvent(
+                    system_blocks=len(context_result.system_blocks),
+                    messages=len(context_result.messages),
+                    selected_tools=_context_selected_tool_names(context_result),
+                    budget=context_budget_to_dict(context_result.budget),
+                    metadata=dict(context_result.metadata),
+                )
 
             req = _build_turn_request(
-                session, opts, extra_system=extra_system, model_override=model_override
+                session, opts, context=context_result, model_override=model_override
             )
 
+            # If the previous turn tripped the guard with force_final, strip
+            # all tools so the model must produce a text response.
+            if _force_final_pending:
+                req.tools = []
+                req.tool_choice = None
+                _force_final_pending = False
+
             assembly: AssistantAssembly | None = None
+            await _start_provider_call(turn_index, req.model)
             try:
                 async for item in stream_turn(session, req):
                     if isinstance(item, AssistantAssembly):
@@ -328,15 +523,24 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                         yield item
             except ContextLengthError:
                 if not session.compaction_retry_used_this_turn:
+                    await _end_active_provider_call(stop_reason="context_length_error")
                     session.mark_compaction_used()
                     await run_forced_compaction(session, agent, signal)
                     yield build_compaction_event(session)
                     _re_inject_skill_context(session)
-                    # Re-run injectors after compaction so fresh context lands
-                    extra_system = []
-                    await _run_context_injectors(session, turn_index, extra_system)
-                    req = _build_turn_request(session, opts, extra_system=extra_system)
+                    # Re-run context builders after compaction so fresh context lands.
+                    context_result = await _build_context_result(session, turn_index)
+                    if context_result is not None:
+                        yield ContextBuildEvent(
+                            system_blocks=len(context_result.system_blocks),
+                            messages=len(context_result.messages),
+                            selected_tools=_context_selected_tool_names(context_result),
+                            budget=context_budget_to_dict(context_result.budget),
+                            metadata=dict(context_result.metadata),
+                        )
+                    req = _build_turn_request(session, opts, context=context_result)
                     assembly = None
+                    await _start_provider_call(turn_index, req.model)
                     async for item in stream_turn(session, req):
                         if isinstance(item, AssistantAssembly):
                             assembly = item
@@ -347,6 +551,11 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
 
             if assembly is None:
                 raise RuntimeError("provider stream ended without assistant assembly")
+
+            await _end_active_provider_call(
+                stop_reason=assembly.stop_reason,
+                usage=assembly.usage,
+            )
 
             await session.append([assembly.message])
             yield AssistantEvent(message=assembly.message, stop_reason=assembly.stop_reason)
@@ -361,11 +570,21 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                 if final_block is not None:
                     # Terminal: treat the tool input as structured output,
                     # do NOT execute it as a normal tool call.
+                    _dur = int((time.time() - started) * 1000)
+                    _final_result = _RunResultInfo(
+                        run_id=run_id,
+                        session_id=session.id,
+                        subtype="success",
+                        stop_reason="tool_use",
+                        total_usage=total,
+                        duration_ms=_dur,
+                    )
+                    await _end_active_turn()
                     yield ResultEvent(
                         subtype="success",
                         stop_reason="tool_use",
                         total_usage=total,
-                        duration_ms=int((time.time() - started) * 1000),
+                        duration_ms=_dur,
                         final_text=None,
                         structured_output=final_block.input,
                     )
@@ -382,11 +601,21 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                         ft, effective_schema
                     )
 
+                _dur = int((time.time() - started) * 1000)
+                _final_result = _RunResultInfo(
+                    run_id=run_id,
+                    session_id=session.id,
+                    subtype="success",
+                    stop_reason=assembly.stop_reason,
+                    total_usage=total,
+                    duration_ms=_dur,
+                )
+                await _end_active_turn()
                 yield ResultEvent(
                     subtype="success",
                     stop_reason=assembly.stop_reason,
                     total_usage=total,
-                    duration_ms=int((time.time() - started) * 1000),
+                    duration_ms=_dur,
                     final_text=ft,
                     structured_output=structured_output,
                     structured_error=structured_error,
@@ -402,6 +631,32 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
                 signal,
             ):
                 yield event
+                if hub.active:
+                    if isinstance(event, ToolCallStartEvent):
+                        await hub.dispatch(
+                            "on_tool_start",
+                            _ToolInfo(
+                                run_id=run_id,
+                                turn_index=turn_index,
+                                tool_use_id=event.tool_use_id,
+                                tool_name=event.tool_name,
+                                input=event.input,
+                                summary=event.summary,
+                            ),
+                        )
+                    elif isinstance(event, ToolCallEndEvent):
+                        await hub.dispatch(
+                            "on_tool_end",
+                            _ToolResultInfo(
+                                run_id=run_id,
+                                turn_index=turn_index,
+                                tool_use_id=event.tool_use_id,
+                                tool_name=event.tool_name,
+                                is_error=event.is_error,
+                                duration_ms=event.duration_ms,
+                                result=event.result,
+                            ),
+                        )
                 if isinstance(event, ToolCallEndEvent):
                     result_blocks.append(
                         ToolResultBlock(
@@ -414,6 +669,69 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             await session.append([result_message])
             yield UserEvent(message=result_message)
 
+            # ── Loop guard evaluation ─────────────────────────────────────
+            if _guard is not None and _guard_state is not None:
+                _decision = evaluate_loop_guard(_guard, _guard_state, tool_blocks, result_blocks)
+                if _decision.action != "continue":
+                    yield LoopGuardEvent(
+                        reason=_decision.reason,
+                        detail=_decision.detail,
+                        action=_decision.action,
+                    )
+                    if _decision.action == "force_final":
+                        # Inject a reminder so the model knows to summarise
+                        # without further tool calls, then let the loop run
+                        # one more tools-disabled turn.
+                        from .skills.system_reminder import wrap_in_system_reminder
+
+                        _reminder_text = wrap_in_system_reminder(
+                            "You appear to be stuck in a loop or repeatedly "
+                            "encountering failures. Please provide your final "
+                            "answer now without making further tool calls."
+                        )
+                        _reminder_msg = Message(
+                            role="user", content=[TextBlock(text=_reminder_text)]
+                        )
+                        await session.append([_reminder_msg])
+                        yield UserEvent(message=_reminder_msg)
+                        _force_final_pending = True
+                    else:
+                        # Hard stop — emit error result and exit.
+                        _dur = int((time.time() - started) * 1000)
+                        _final_result = _RunResultInfo(
+                            run_id=run_id,
+                            session_id=session.id,
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        await _end_active_turn()
+                        yield ResultEvent(
+                            subtype="error",
+                            stop_reason="error",
+                            total_usage=total,
+                            duration_ms=_dur,
+                        )
+                        return
+            # Natural end of turn body (guard said "continue" or "force_final").
+            await _end_active_turn()
+
+        # ── Max-turns exhausted ───────────────────────────────────────────
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+        )
+        yield LoopGuardEvent(
+            reason="max_turns",
+            detail=f"Maximum turns ({max_turns}) reached.",
+            action="stop",
+        )
         yield ErrorEvent(
             error={
                 "name": "TurnLimitError",
@@ -425,29 +743,61 @@ async def run_loop(session: Session, prompt: str, opts: RunOptions) -> AsyncIter
             subtype="error",
             stop_reason="error",
             total_usage=total,
-            duration_ms=int((time.time() - started) * 1000),
+            duration_ms=_dur,
         )
     except AbortError:
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="aborted",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+        )
+        await _close_active_observer_spans(stop_reason="error")
         yield ResultEvent(
             subtype="aborted",
             stop_reason="error",
             total_usage=total,
-            duration_ms=int((time.time() - started) * 1000),
+            duration_ms=_dur,
         )
     except Exception as exc:
         retryable = getattr(exc, "retryable", False)
         status = getattr(exc, "status", None)
-        yield ErrorEvent(
-            error={
-                "name": exc.__class__.__name__,
-                "message": str(exc),
-                "retryable": retryable,
-                **({"status": status} if isinstance(status, int) else {}),
-            }
+        _err_dict: dict[str, object] = {
+            "name": exc.__class__.__name__,
+            "message": str(exc),
+            "retryable": retryable,
+            **({"status": status} if isinstance(status, int) else {}),
+        }
+        _dur = int((time.time() - started) * 1000)
+        _final_result = _RunResultInfo(
+            run_id=run_id,
+            session_id=session.id,
+            subtype="error",
+            stop_reason="error",
+            total_usage=total,
+            duration_ms=_dur,
+            error=_err_dict,
         )
+        await _close_active_observer_spans(stop_reason="error")
+        yield ErrorEvent(error=_err_dict)
         yield ResultEvent(
             subtype="error",
             stop_reason="error",
             total_usage=total,
-            duration_ms=int((time.time() - started) * 1000),
+            duration_ms=_dur,
         )
+    finally:
+        if hub.active:
+            await _close_active_observer_spans(stop_reason="error")
+            _run_result = _final_result or _RunResultInfo(
+                run_id=run_id,
+                session_id=session.id,
+                subtype="error",
+                stop_reason="error",
+                total_usage=total,
+                duration_ms=int((time.time() - started) * 1000),
+            )
+            await hub.dispatch("on_run_end", _run_result)

@@ -78,10 +78,14 @@ class Session:
 
         async def iterator() -> AsyncIterator[Event]:
             from .loop import run_loop
+            from .observability import ObserverDispatcher
 
+            _obs_hub = ObserverDispatcher(getattr(self.agent, "observers", None))
             try:
                 async for event in run_loop(self, prompt, opts or RunOptions()):
                     yield event
+                    if _obs_hub.active:
+                        await _obs_hub.dispatch("on_event", event)
             finally:
                 self._active = False
                 self.active_run_id = None

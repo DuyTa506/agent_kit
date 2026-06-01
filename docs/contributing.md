@@ -41,7 +41,7 @@ pytest -k "context"                         # filter by name
 Live API tests are skipped unless `OPENAI_API_KEY` is set:
 
 ```bash
-OPENAI_API_KEY=sk-... pytest tests/test_live_api.py
+OPENAI_API_KEY="$OPENAI_API_KEY" pytest tests/test_live_api.py
 ```
 
 ---
@@ -57,6 +57,7 @@ Tools are **duck-typed protocols** — do not subclass anything. Implement the f
 class MyTool:
     name = "my_tool"
     scope = "read"
+    parallel = True
     parallel_safe = True
     ...
 
@@ -165,10 +166,12 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 1. Implement the duck-typed protocol (no base class).
 2. Choose `scope`: `"read"` (no side effects), `"write"` (creates/modifies files or state), `"exec"` (runs commands or external processes).
-3. Set `parallel_safe = True` only if the tool can run concurrently with itself without conflict.
-4. Use `ctx.deps` for shared application state — do not use global variables.
-5. `validate()` should raise `ValueError` with a clear message. It runs before permission checks.
-6. `summarize()` should return a single line — it appears in logs and compaction summaries.
+3. Set `parallel = True` for read/search tools that can run concurrently. Keep `parallel_safe = True` too when supporting older integrations.
+4. Add `resources(input) -> list[ResourceAccess]` when the tool touches files, indexes, databases, tenant state, or other shared resources. Read/read can overlap; write conflicts serialize.
+5. Use `ctx.deps` for shared application state — do not use global variables.
+6. Return `ToolResult` with `metadata`, `citations`, and `truncated` when the host app needs provenance or rich rendering.
+7. `validate()` should raise `ValueError` with a clear message. It runs before permission checks.
+8. `summarize()` should return a single line — it appears in logs and compaction summaries.
 
 ---
 
@@ -204,15 +207,16 @@ src/agent_kit/          core library
   types.py              all shared dataclasses
   events.py             event dataclasses + serialization
   config.py             FeatureFlags, SystemPromptConfig
-  context_hooks.py      ContextInjector protocol + TurnContext
-  scheduler.py          parallel tool execution
+  context/              ContextBuilder protocol + budget/result types
+  memory/               MemoryStore protocol + reference RAG primitives
+  scheduler.py          resource-aware parallel tool execution
   compaction.py         context-window management
   permissions/          PermissionEngine + rule types
   providers/            BaseProvider + OpenAI Chat/Responses/Anthropic/Retry
   tools/                tool protocol, ToolContext, ToolRegistry, built-ins
   sessions/             SessionStore + InMemory + SQLite
   mcp/                  MCP server adapters
-  skills/               SKILL.md loader + context injection
+  skills/               SKILL.md loader + skill context reminders
   subagents/            agents.yaml loader + child agent runner
   recipes/              factory helpers (additive, not part of the loop)
 

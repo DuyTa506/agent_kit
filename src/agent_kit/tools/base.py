@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 ToolScope = Literal["read", "write", "exec"]
+ResourceMode = Literal["read", "write"]
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceAccess:
+    resource: str
+    mode: ResourceMode = "read"
+
+
+@dataclass(slots=True)
+class Citation:
+    id: str
+    source: str
+    label: str | None = None
+    chunk: str | None = None
+    score: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -42,9 +59,13 @@ class ToolContext:
 @dataclass(slots=True)
 class ToolResult:
     content: str
-    summary: str
+    summary: str = ""
     is_error: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+    citations: list[Citation] = field(default_factory=list)
+    attachments: list[Any] = field(default_factory=list)
     duration_ms: int = 0
+    truncated: bool = False
 
 
 class Tool(Protocol):

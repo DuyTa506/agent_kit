@@ -32,6 +32,11 @@ class ToolExecutionError(AgentKitError):
     kind = "tool_execution"
 
 
+class ToolTimeoutError(AgentKitError):
+    kind = "tool_timeout"
+    retryable = True
+
+
 class AbortError(AgentKitError):
     kind = "abort"
 

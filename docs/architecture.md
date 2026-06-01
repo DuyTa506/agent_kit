@@ -1,302 +1,704 @@
 # AgentKit Architecture
 
-Deep-dive reference for contributors. Covers the full data flow, every subsystem's contract, and the key design invariants that must not break.
+Professional reference for the V2 harness. Covers every subsystem, its contract, the complete data flow, and the invariants that must not break.
 
 ---
 
-## Bird's-eye view
+## 1. System Overview
 
-```
-Caller
-  │
-  ├─ Agent(config)           ← immutable after init
-  │     model, provider, tools, permissions,
-  │     system_prompt_config, context_injectors,
-  │     deps, output_schema, features
-  │
-  └─ session = await agent.session()   ← mutable per-conversation state
-        │
-        └─ async for event in session.run(prompt, RunOptions?):
-              │
-              └─ run_loop()            ← the engine
-                    │
-                    ├─ _re_inject_skill_context()
-                    ├─ _run_context_injectors()   ← mutates provider_view
-                    ├─ _build_turn_request()
-                    ├─ provider.stream(req)
-                    ├─ assemble response
-                    ├─ permission check  (PermissionEngine)
-                    ├─ scheduler.execute_tools()
-                    └─ yield events → caller
-```
+The framework is a harness of pluggable subsystems composed around a single event-driven loop. The caller only interacts with `Agent` (config) and `Session` (state); everything else is internal machinery wired together inside `run_loop`.
 
-Every cross-cutting concern (compaction, skills, subagents, structured output, deps) plugs into one of these seams rather than scattering through the loop.
+```mermaid
+graph TD
+    subgraph Host["Host Application"]
+        Caller["Caller"]
+    end
+
+    subgraph Core["AgentKit Core"]
+        Agent["Agent\nmodel · provider · tools\npermissions · loop_guard\ncontext_builder · deps"]
+        Session["Session\nprovider_view · full_history\nrun_deps · active_run_id"]
+        RunLoop["run_loop()"]
+
+        subgraph Pipeline["Turn Pipeline"]
+            SK["_re_inject_skill_context()"]
+            CB["ContextBuilder\nRAG · budget · tool select"]
+            BTR["_build_turn_request()\n+ capability downgrade"]
+            PERM["PermissionEngine\nrule eval · loop pause"]
+            SCHED["Scheduler\nparallel · serialize · resource lock"]
+            LG["LoopGuard\nloop detection"]
+        end
+
+        subgraph Providers["Providers"]
+            OAR["OpenAIResponsesProvider"]
+            OAC["OpenAIChatCompletionsProvider"]
+            ANT["AnthropicProvider"]
+        end
+
+        subgraph Storage["Storage"]
+            SS["SessionStore\nInMemory · SQLite"]
+        end
+
+        subgraph Knowledge["Knowledge"]
+            MEM["MemoryStore\nkeyword · sqlite · custom"]
+        end
+
+        subgraph Extensions["Extensions"]
+            MCP["MCP Servers"]
+            SKILLS["Skills\n.agent_kit/skills/"]
+            SUBA["Subagents\n.agent_kit/agents.yaml"]
+        end
+    end
+
+    Caller -->|"Agent(config)"| Agent
+    Agent -->|"session()"| Session
+    Session -->|"run(prompt)"| RunLoop
+    RunLoop --> SK
+    SK --> CB
+    CB --> BTR
+    BTR --> OAR & OAC & ANT
+    RunLoop --> PERM
+    PERM --> SCHED
+    SCHED --> LG
+    RunLoop -.->|"AsyncIterator[Event]"| Caller
+    Session <-->|"persist / load"| SS
+    CB <-->|"recall / upsert"| MEM
+    Agent <--> MCP & SKILLS & SUBA
+```
 
 ---
 
-## Module inventory
+## 2. Turn Lifecycle
+
+One complete agent turn — from receiving the prompt to deciding whether to continue looping.
+
+```mermaid
+sequenceDiagram
+    actor Caller
+    participant RL as run_loop()
+    participant CB as ContextBuilder
+    participant PR as Provider
+    participant PE as PermissionEngine
+    participant SC as Scheduler
+    participant LG as LoopGuard
+
+    Caller->>RL: session.run(prompt, RunOptions?)
+    RL-->>Caller: SystemEvent
+    RL-->>Caller: UserEvent
+
+    loop Each turn
+        RL->>CB: build(ContextBuildTurn)
+        CB-->>RL: ContextBuildResult
+        RL-->>Caller: ContextBuildEvent
+
+        Note over RL: _build_turn_request()<br/>+ apply_provider_capabilities()
+
+        RL->>PR: stream(ProviderRequest)
+        PR-->>Caller: PartialAssistantEvent (streaming)
+        PR-->>RL: AssistantAssembly(message, stop_reason, usage)
+
+        RL-->>Caller: AssistantEvent + UsageEvent
+
+        alt stop_reason = end_turn
+            RL-->>Caller: ResultEvent(success)
+        else stop_reason = tool_use
+            RL->>PE: check_all(tool_calls)
+            PE-->>Caller: PermissionRequestEvent (if pending)
+            PE-->>RL: approved calls
+
+            RL->>SC: execute_tool_calls(approved_calls)
+            SC-->>Caller: ToolCallStartEvent x N
+            SC-->>Caller: ToolCallEndEvent x N
+            SC-->>RL: result_blocks
+
+            RL->>LG: evaluate_loop_guard(state, tool_blocks, result_blocks)
+
+            alt action = stop
+                LG-->>RL: LoopGuardDecision(stop)
+                RL-->>Caller: LoopGuardEvent
+                RL-->>Caller: ResultEvent(error)
+            else action = force_final
+                LG-->>RL: LoopGuardDecision(force_final)
+                RL-->>Caller: LoopGuardEvent
+                Note over RL: inject reminder message<br/>strip tools next turn
+            else action = continue
+                LG-->>RL: LoopGuardDecision(continue)
+                Note over RL: append results to provider_view<br/>loop back to top
+            end
+        end
+    end
+```
+
+---
+
+## 3. Subsystems
+
+### 3.1 Scheduler — Parallel & Serialized Execution
+
+The scheduler is the only place tool calls are executed. It enforces concurrency policies and resource conflict rules before dispatching.
+
+```mermaid
+flowchart TD
+    IN["Incoming ToolUseBlocks\n(from AssistantAssembly)"]
+
+    RESOLVE["Resolve each call\n• validate JSON input\n• look up tool in registry\n• collect ResourceAccess declarations"]
+
+    CLASSIFY{{"Classify\ntool scope"}}
+
+    READ["scope = read\nAND parallel = True"]
+    WRITE["scope = write or exec\nOR parallel = False"]
+
+    RES{{"ResourceAccess\nconflict check"}}
+
+    PAR["Run concurrently\nup to max_tool_concurrency\n(default: CPU count)"]
+    SER["Serialize\none at a time\nwait for prior to finish"]
+
+    OUT["Collect ToolCallEndEvents\nin original provider call order"]
+
+    IN --> RESOLVE --> CLASSIFY
+    CLASSIFY -->|"read + parallel"| READ
+    CLASSIFY -->|"write / exec"| WRITE
+    READ --> RES
+    WRITE --> RES
+    RES -->|"no resource conflict"| PAR
+    RES -->|"same resource\nconflicting mode"| SER
+    PAR --> OUT
+    SER --> OUT
+```
+
+**Rules:**
+- `scope="read"` + `parallel=True` → may run concurrently up to `Agent(max_tool_concurrency=N)` or env `AGENTKIT_MAX_TOOL_CONCURRENCY`.
+- `scope="write"` or `scope="exec"` → always serialize, regardless of `parallel` flag.
+- `ResourceAccess(resource, mode)` enables finer conflict detection: two `"read"` accesses on the same resource overlap freely; any `"write"` on a resource being read or written by another call serializes.
+- Result events are emitted in the **original provider tool-call order**, not completion order.
+- **Timeouts** — `Agent(tool_timeout_ms=N)` (env `AGENTKIT_TOOL_TIMEOUT_MS`) sets an agent-wide execution deadline. Per-tool override: `execution_timeout_ms` class attribute (`0` = opt-out). Timeout → `is_error=True` result, run continues. Uses `asyncio.wait_for` (Python 3.10 safe). `ToolTimeoutError` (`retryable=True`) is the typed exception class.
+- **Retry** — `Agent(tool_retry=RetryOptions(...))` enables opt-in exponential-backoff retry. Read-scope tools retry any exception; write/exec tools only retry when the tool sets `retryable = True`. `AbortError` is never retried.
+
+---
+
+### 3.2 Loop Guard — Agentic Loop Detection
+
+Detects obvious runaway loops cheaply (no extra LLM call) and terminates cleanly.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> Running : run_loop() starts\nguard = LoopGuard() by default
+
+    Running --> Evaluating : tool batch completed\nevaluate_loop_guard()
+
+    Evaluating --> Running : action = continue\nno threshold crossed
+
+    Evaluating --> ForceFinalPending : action = force_final\nemit LoopGuardEvent\ninject reminder message
+
+    ForceFinalPending --> Running : next turn\nreq.tools cleared\nreq.tool_choice cleared
+
+    Running --> Stopped : stop_reason = end_turn\nor final_tool intercepted
+
+    Evaluating --> Stopped : action = stop\nemit LoopGuardEvent\nemit ResultEvent(error)
+
+    Stopped --> [*]
+```
+
+**Trip conditions** — `evaluate_loop_guard` checks after every tool batch:
+
+| Check | Threshold | Config field |
+|---|---|---|
+| Repeated identical call | `call_counts[name:sorted_json] >= N` | `max_identical_tool_calls` (default `3`) |
+| Consecutive failure streak | all tools errored for N batches in a row | `max_consecutive_failures` (default `3`) |
+| Max turns | `range(max_turns)` exhausted | `Agent(max_turns=N)` emits `LoopGuardEvent(reason="max_turns")` |
+
+`force_final_answer=True` injects a `<system-reminder>` message and strips `req.tools = []` for one final turn so the model must answer in text.
+
+---
+
+### 3.3 Provider Capabilities — Request Downgrade
+
+Every provider declares its feature support. `_build_turn_request` applies downgrades so no provider receives flags it cannot handle.
+
+```mermaid
+flowchart LR
+    OPTS["Agent / RunOptions\noutput_schema\ntool_choice\ncache_prompt = True\ncache_ttl"]
+
+    REQ["ProviderRequest\n(initial build)"]
+
+    CAPS["provider.capabilities(model)\nProviderCapabilities"]
+
+    APPLY["apply_provider_capabilities(req, caps)"]
+
+    C1{{"prompt_cache\n= False?"}}
+    C2{{"tool_choice\n= False?"}}
+    C3{{"structured_output\n= False?"}}
+
+    D1["clear cache_prompt\nclear cache_ttl"]
+    D2["clear tool_choice"]
+    D3["clear output_schema\nloop text-parses response instead"]
+
+    FINAL["ProviderRequest\n(provider-ready)"]
+
+    OPTS --> REQ --> CAPS --> APPLY
+    APPLY --> C1
+    C1 -->|"yes"| D1 --> C2
+    C1 -->|"no"| C2
+    C2 -->|"yes"| D2 --> C3
+    C2 -->|"no"| C3
+    C3 -->|"yes"| D3 --> FINAL
+    C3 -->|"no"| FINAL
+```
+
+**Declared capabilities per provider:**
+
+| Provider | `prompt_cache` | `structured_output` | `tool_choice` |
+|---|---|---|---|
+| `OpenAIResponsesProvider` | ✗ | ✓ | ✓ |
+| `OpenAIChatCompletionsProvider` | ✗ | ✓ | ✓ |
+| `AnthropicProvider` | ✓ | ✗ | ✓ |
+
+Duck-typed test fakes that omit `capabilities()` are safely skipped via a `hasattr` guard — no test changes required when adding new providers.
+
+---
+
+### 3.4 Context Building Pipeline
+
+Context builders fire before every provider call, injecting ephemeral context without mutating conversation history.
+
+```mermaid
+flowchart TD
+    SNAP["session.provider_view\n(immutable snapshot)"]
+
+    subgraph Chain["ContextBuilderChain (registration order)"]
+        direction TB
+        B1["Builder 1\ne.g. MemoryContextBuilder"]
+        B2["Builder 2\ne.g. custom RAG"]
+        BN["Builder N"]
+        B1 --> B2 --> BN
+    end
+
+    CBR["ContextBuildResult\nsystem_blocks · messages\nselected_tools · budget · metadata"]
+
+    BUDGET["apply_context_budget()\ntrim messages and blocks\nto budget.max_tokens"]
+
+    MERGE["Merge into ProviderRequest only\nnever appended to provider_view"]
+
+    EVENT["yield ContextBuildEvent\n(block count · tool count · budget)"]
+
+    SNAP --> Chain --> CBR --> BUDGET --> MERGE --> EVENT
+```
+
+**Rules:**
+- Builder output is **ephemeral** — appended only to `ProviderRequest`, never to `session.provider_view` or `full_history`.
+- `ContextBudget(max_tokens=N)` trims messages and system blocks before the request is sent.
+- `selected_tools` narrows the provider schema list for this turn only; `session.agent.tools` is not mutated.
+- Multiple builders compose via `ContextBuilderChain`; each receives the same unmodified view snapshot.
+- Builders must not block — use `await` for I/O.
+
+---
+
+### 3.5 Session History Model
+
+Two separate lists track conversation history; only one is ever sent to the LLM.
+
+```mermaid
+graph TD
+    subgraph FH["full_history  — append-only audit record"]
+        direction LR
+        fh1["user turn 1"] --> fh2["assistant turn 1"] --> fh3["user turn 2"] --> fh4["assistant tool call"] --> fh5["tool result"] --> fh6["...all turns intact"]
+    end
+
+    subgraph PV["provider_view  — trimmed copy sent to LLM"]
+        direction LR
+        pvc["COMPACTED SUMMARY"] --> pv4["assistant tool call"] --> pv5["tool result"] --> pv6["...recent turns"]
+    end
+
+    COMP["Compaction\nmutates provider_view only\nreplaces old messages with summary\nnever touches full_history"]
+
+    CTX["ContextBuilder output\nephemeral per-request\nappended to ProviderRequest only\nnot stored in either list"]
+
+    COMP --> PV
+    CTX -.->|"injected per-request"| PV
+```
+
+**Invariant:** `full_history` is a strict superset of the logical conversation. Do not write to it outside `loop.py`.
+
+---
+
+### 3.6 Permission Evaluation
+
+Every tool call passes through the permission engine before reaching the scheduler.
+
+```mermaid
+flowchart TD
+    CALLS["Pending tool calls"]
+
+    RULES["Evaluate rule list in order\n1  ToolRule(tool_name, allow|deny)\n2  PathRule(path_globs, allow|deny)\n3  BashRule(cmd_patterns, allow|deny)"]
+
+    MATCH{{"Rule\nmatched?"}}
+
+    MODE{{"Mode\ndefault"}}
+
+    AS["skip-dangerous\nauto-approve all"]
+    AE["acceptEdits\nauto-approve file ops\nask for Bash"]
+    ASK["emit PermissionRequestEvent\nsuspend loop\nwait for caller response"]
+
+    EXEC["Dispatch to Scheduler"]
+    DENY["ToolCallEndEvent(is_error=True)"]
+
+    CALLS --> RULES --> MATCH
+    MATCH -->|"allow"| EXEC
+    MATCH -->|"deny"| DENY
+    MATCH -->|"no match"| MODE
+    MODE -->|"skip-dangerous"| AS --> EXEC
+    MODE -->|"acceptEdits"| AE --> EXEC
+    MODE -->|"default"| ASK
+    ASK -->|"approved"| EXEC
+    ASK -->|"denied"| DENY
+```
+
+---
+
+### 3.7 Memory and RAG Layer
+
+Core ships a pluggable protocol with two reference implementations. Vector databases, embedding clients, and graph stores are host-owned and inject via the same protocol.
+
+```mermaid
+graph TD
+    subgraph Protocol["MemoryStore Protocol"]
+        MS["MemoryStore\nasync search(query, limit, namespace)\nasync upsert(items: list[MemoryItem])"]
+    end
+
+    subgraph Ref["Reference Implementations"]
+        IK["InMemoryKeywordMemoryStore\nBM25-style keyword matching"]
+        SQ["SqliteMemoryStore\nasync via asyncio.to_thread"]
+    end
+
+    subgraph Host["Host-Owned Adapters"]
+        VEC["Vector store\nembed + ANN search"]
+        GRF["Graph store"]
+        REM["Remote store\nAPI call"]
+    end
+
+    subgraph Integration["Integration Points"]
+        MCB["MemoryContextBuilder\nrecalls top-K items\nas ephemeral context per turn"]
+        MST["MemorySearchTool\nscope=read · parallel=True\nResourceAccess(memory:ns, read)"]
+        MUT["MemoryUpsertTool\nscope=write\nResourceAccess(memory:ns, write)"]
+    end
+
+    MS --> IK & SQ
+    MS --> VEC & GRF & REM
+    IK & SQ & VEC & GRF & REM --> MCB
+    IK & SQ & VEC & GRF & REM --> MST & MUT
+```
+
+Do not add vector database or embedding dependencies to core; adapters implement the protocol and live in examples or recipes.
+
+---
+
+## 4. Event Taxonomy
+
+All events are `@dataclass(slots=True)` with a `type: Literal[...]` discriminator. Every cross-cutting concern surfaces through events; callers never poll internal state.
+
+```mermaid
+graph LR
+    subgraph Life["Lifecycle"]
+        direction TB
+        SE["SystemEvent\ntype=system · subtype=init\nsession_id · run_id · model · tools · cwd"]
+        UE["UserEvent\ntype=user · message"]
+        AE["AssistantEvent\ntype=assistant · message · stop_reason"]
+        PAE["PartialAssistantEvent\ntype=partial_assistant · delta"]
+        RE["ResultEvent\ntype=result\nsubtype = success | error | aborted\nfinal_text · structured_output · total_usage"]
+        ERR["ErrorEvent\ntype=error · error dict"]
+    end
+
+    subgraph Tools["Tool Execution"]
+        direction TB
+        TCS["ToolCallStartEvent\ntype=tool_call_start\ntool_name · input · summary"]
+        TCE["ToolCallEndEvent\ntype=tool_call_end\nresult · is_error · duration_ms"]
+        PRE["PermissionRequestEvent\ntype=permission_request"]
+    end
+
+    subgraph Ctx["Context & Control"]
+        direction TB
+        CBE["ContextBuildEvent\ntype=context_build\nblock counts · budget · metadata"]
+        CE["CompactionEvent\ntype=compaction\nmessages before/after · tokens before/after"]
+        LGE["LoopGuardEvent\ntype=loop_guard\nreason · detail · action"]
+        UGE["UsageEvent\ntype=usage · usage · cumulative"]
+    end
+
+    subgraph Skill["Skills & Subagents"]
+        direction TB
+        SLE["SkillsLoadedEvent"]
+        SIE["SkillInvokedEvent"]
+        SCE["SkillCompletedEvent"]
+        SAE["SubagentEvent\nwraps a nested Event"]
+    end
+```
+
+`event_to_dict` and `event_from_dict` in `events.py` provide full round-trip serialization for all event types.
+
+---
+
+## 5. Key Data Types
+
+```mermaid
+classDiagram
+    class Agent {
+        +model: str
+        +provider: BaseProvider
+        +tools: ToolRegistry
+        +loop_guard: LoopGuard | None
+        +context_builder: ContextBuilder | None
+        +max_turns: float
+        +permission_engine: PermissionEngine
+        +deps: Any
+        +output_schema: OutputSchema | None
+        +session() Session
+    }
+
+    class ProviderRequest {
+        +model: str
+        +system: list~SystemBlock~
+        +tools: list~dict~
+        +messages: list~Message~
+        +output_schema: OutputSchema | None
+        +tool_choice: ToolChoice | None
+        +cache_prompt: bool | None
+        +cache_ttl: str | None
+        +max_output_tokens: int | None
+    }
+
+    class ProviderCapabilities {
+        +context_window: int
+        +parallel_tool_calls: bool
+        +structured_output: bool
+        +tool_choice: bool
+        +prompt_cache: bool
+    }
+
+    class LoopGuard {
+        +max_identical_tool_calls: int
+        +max_consecutive_failures: int
+        +force_final_answer: bool
+    }
+
+    class ToolResult {
+        +content: str
+        +summary: str | None
+        +is_error: bool
+        +metadata: dict | None
+        +citations: list~Citation~
+        +duration_ms: int
+        +truncated: bool
+    }
+
+    class ContextBuildResult {
+        +system_blocks: list~SystemBlock~
+        +messages: list~Message~
+        +selected_tools: Any
+        +budget: ContextBudget
+        +metadata: dict
+    }
+
+    class MemoryItem {
+        +id: str
+        +text: str
+        +namespace: str | None
+        +metadata: dict
+    }
+
+    class ResourceAccess {
+        +resource: str
+        +mode: Literal~read, write~
+    }
+
+    Agent --> LoopGuard
+    Agent --> ProviderCapabilities : via provider.capabilities()
+    Agent --> ProviderRequest : builds per turn
+    ProviderRequest --> ProviderCapabilities : downgraded by
+    ToolResult --> ResourceAccess : tool declares
+```
+
+---
+
+## 6. Module Inventory
 
 | Module | Responsibility |
 |--------|---------------|
-| `agent.py` | Immutable config object; builds system blocks; owns `session()` factory |
+| `agent.py` | Immutable config; system block assembly; `session()` factory |
 | `session.py` | Per-conversation state: `provider_view`, `full_history`, `run_deps`, `RunOptions` |
-| `loop.py` | Main agent loop: turn orchestration, event emission, compaction trigger |
-| `types.py` | All shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
-| `events.py` | All event dataclasses + `event_to_dict`/`event_from_dict` |
+| `loop.py` | Turn orchestration, event emission, compaction trigger, loop guard wiring, capability downgrade |
+| `types.py` | Shared dataclasses: `Message`, `ContentBlock`, `ProviderRequest`, `OutputSchema` |
+| `events.py` | All event dataclasses + round-trip serialization (`event_to_dict` / `event_from_dict`) |
 | `config.py` | `FeatureFlags`, `SystemPromptConfig` |
-| `context_hooks.py` | `ContextInjector` protocol, `TurnContext`, `prune_tagged` |
-| `scheduler.py` | Parallel tool execution with concurrency cap |
+| `context/` | `ContextBuilder`, `ContextBuildResult`, `ContextBudget`, `ContextBuilderChain` |
+| `loop_guard/` | `LoopGuard`, `LoopGuardState`, `LoopGuardDecision`, `evaluate_loop_guard`, `normalize_loop_guard` |
+| `memory/` | `MemoryStore` protocol, reference stores, `MemoryContextBuilder`, memory tools |
+| `scheduler.py` | Resource-aware parallel tool execution with concurrency cap |
 | `compaction.py` | Context-window management; calls `agent.provider` directly |
-| `permissions/engine.py` | Rule evaluation; emits `PermissionRequestEvent` and pauses loop |
-| `providers/` | `BaseProvider` + OpenAI Chat, OpenAI Responses, Anthropic, Retry |
-| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, built-in tools |
-| `sessions/` | `SessionStore` protocol + `InMemorySessionStore` + `SqliteSessionStore` |
+| `permissions/` | `PermissionEngine`: rule evaluation, event emission, loop suspension |
+| `providers/` | `BaseProvider`, `ProviderCapabilities`, OpenAI Chat, OpenAI Responses, Anthropic |
+| `tools/` | Tool protocol, `ToolContext`, `ToolRegistry`, `ToolResult`, `Citation`, built-in tools |
+| `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
 | `mcp/` | MCP server connection → AgentKit tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
 | `subagents/` | Specialized agent roles from `.agent_kit/agents.yaml` |
-| `recipes/` | Factory helpers; not part of the loop — purely additive |
+| `recipes/` | Factory helpers (`rag_agent`, `sql_agent`, etc.) — purely additive |
 
 ---
 
-## Data flow: one turn in detail
+## 7. Provider Contract
 
-```
-run_loop() top of turn N
-│
-├─ 1. _re_inject_skill_context(session)
-│      – re-inserts the active skill's system reminder into provider_view
-│      – no-op when no skill is active
-│
-├─ 2. _run_context_injectors(session, turn_index, extra_system)
-│      – fires each ContextInjector.before_turn(TurnContext)
-│      – injectors may append/prune Messages in provider_view
-│      – injectors may append SystemBlocks into extra_system list
-│
-├─ 3. _build_turn_request(session, opts, extra_system, model_override)
-│      – merges agent.system_blocks + extra_system → ProviderRequest.system
-│      – copies session.provider_view → ProviderRequest.messages
-│      – threads output_schema, tool_choice, thinking, effort from opts/agent
-│
-├─ 4. provider.stream(req) → AsyncIterator[StreamEvent]
-│      – normalized dicts: {"type": "text_delta"|"tool_use"|"usage"|"stop", ...}
-│
-├─ 5. assemble AssistantAssembly(message, stop_reason, usage)
-│      – collects TextBlocks and ToolUseBlocks
-│      – emits partial_assistant events during streaming
-│
-├─ 6. final_tool_name interception (if set)
-│      – if any ToolUseBlock.name == final_tool_name:
-│          structured_output = block.input
-│          emit ResultEvent(structured_output=...) and return
-│      – tool is NOT dispatched to scheduler
-│
-├─ 7. PermissionEngine.check_all(tool_calls) → approved / pending
-│      – emits PermissionRequestEvent and suspends until caller responds
-│
-├─ 8. scheduler.execute_tools(approved_calls, session)
-│      – each tool.execute(input, ToolContext(deps=session.run_deps))
-│      – parallel if all are parallel_safe; otherwise serial
-│      – respects AGENTKIT_MAX_TOOL_CONCURRENCY
-│
-├─ 9. update session.provider_view + full_history
-│
-└─ 10. emit events; continue loop if stop_reason == "tool_use"
-        stop when stop_reason == "end_turn" (text-only response)
-```
-
-### Two views of history
-
-`session.provider_view` — trimmed list sent to the LLM each turn. Compaction modifies only this list (old messages replaced by a summary). Context injectors also mutate this list per-turn.
-
-`session.full_history` — append-only complete record. Never sent to the provider; used for auditing and session persistence.
-
-**Invariant:** `full_history` is a strict superset of the logical conversation. Do not modify it outside `loop.py`.
-
----
-
-## Provider contract
-
-Every provider implements `BaseProvider` (two methods):
+Every provider implements `BaseProvider` (three methods):
 
 ```python
-class BaseProvider(Protocol):
+class BaseProvider(ABC):
+    id: str
+
     def context_window(self, model: str) -> int: ...
-    async def stream(self, req: ProviderRequest) -> AsyncIterator[dict]: ...
+
+    async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]: ...
+
+    def capabilities(self, model: str) -> ProviderCapabilities:
+        # Default derives context_window only; override to declare full support
+        return ProviderCapabilities(context_window=self.context_window(model))
 ```
 
-`stream()` yields normalized dicts — not raw API objects. Required keys by type:
+`stream()` yields **normalized dicts** — never raw API objects. Required keys by event type:
 
-| `type` value | Required keys |
+| `type` value | Required additional keys |
 |---|---|
+| `"message_start"` | `model: str` |
 | `"text_delta"` | `text: str` |
-| `"tool_use"` | `id: str`, `name: str`, `input: dict` |
-| `"usage"` | `input_tokens: int`, `output_tokens: int` |
-| `"stop"` | `stop_reason: StopReason` |
-| `"thinking_delta"` | `thinking: str` |
+| `"tool_use_start"` | `id: str`, `name: str` |
+| `"tool_use_input_delta"` | `id: str`, `json_delta: str` |
+| `"tool_use_end"` | `id: str` |
+| `"thinking_delta"` | `text: str`, `signature?: str` |
+| `"message_end"` | `stop_reason: StopReason`, `usage: Usage`, `provider_metadata: Any` |
 
-The loop in `loop.py` assembles these — it never touches raw API types. Adding a new provider means implementing this dict contract only.
-
-### RetryProvider
-
-Wraps any `BaseProvider` with exponential-backoff retry (connect + first chunk only — retrying mid-stream is unsafe). Honors `ProviderRequest.max_retries` and `RateLimitError.retry_after_seconds`.
+The loop assembles these — it never imports any provider's raw types. Adding a new provider means implementing this dict contract only.
 
 ---
 
-## Tool protocol
+## 8. Tool Protocol
 
-Tools are **duck-typed** — no base class required. Required interface:
+Tools are **duck-typed** — no base class, no `isinstance` check anywhere in the core:
 
 ```python
 class MyTool:
-    name: str                    # unique identifier
-    description: str             # shown to the model
-    input_schema: dict           # JSON Schema
-    scope: Literal["read","write","exec"]
-    parallel_safe: bool          # can run alongside other parallel tools
+    name: str                                      # unique registry key
+    description: str                               # shown to the model
+    input_schema: dict                             # JSON Schema object
+    scope: Literal["read", "write", "exec"]
+    parallel: bool                                 # V2 concurrency flag
 
-    def validate(self, raw: dict) -> dict: ...          # raise ValueError on bad input
+    # Optional Phase-11 reliability attributes (all duck-typed via getattr)
+    execution_timeout_ms: float                    # per-tool timeout; 0 = opt-out
+    retryable: bool                                # opt write/exec tool into retry
+
+    def validate(self, raw: dict) -> dict: ...
+    def resources(self, input: dict) -> list[ResourceAccess]: ...
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult: ...
-    def summarize(self, input: dict) -> str: ...        # one-line description for logs
+    def summarize(self, input: dict) -> str: ...   # one-line for logs
 ```
 
 `ToolContext` carries: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `deps`.
 
-`deps` is set from `session.run_deps` by the scheduler — it is whatever the caller passed as `Agent(deps=...)` or `RunOptions(deps=...)`.
+`deps` is threaded from `Agent(deps=...)` or overridden per-run with `RunOptions(deps=...)`. Use it to inject app state into tools without globals.
 
 ### ToolRegistry
 
 ```python
-registry.register(tool)           # add
-registry.unregister(name)         # remove by name
-registry.replace(tool)            # swap (same name)
-registry.copy()                   # shallow clone
-registry.subset(include, exclude) # filter by name set
-
-# Module-level factories
-empty_tools(*extra)               # no built-ins + optional extras
-tools_from_defaults(exclude, extra)  # standard set ± named tools
+registry.add(tool)                        # add; raises if name exists
+registry.remove(name)                     # remove by name
+registry.replace(tool)                    # swap same-named tool
+registry.select(names={...}, tags={...})  # runtime subset (per-request)
+registry.copy()                           # shallow clone
+registry.schemas()                        # provider-ready schema list
+empty_tools(*extra)                       # no built-ins + optional extras
+tools_from_defaults(exclude, extra)       # standard set ± named tools
 ```
 
 ---
 
-## System prompt construction
+## 9. System Prompt Layers
 
-`Agent._build_system_blocks(tool_names)` assembles the system from four layers, in order:
+`Agent._build_system_blocks(tool_names)` assembles the system prompt from four ordered layers:
 
-1. **Custom blocks** — `SystemPromptConfig.blocks` (prepended before identity)
-2. **Identity block** — "You are AgentKit…" (omitted if `replace_defaults=True`)
-3. **Protocol block** — tool-use instructions (omitted if `replace_defaults=True` or if no SWE tools present); clauses are conditional on which tool families are registered
-4. **Append block** — `SystemPromptConfig.append` or legacy `Agent(system_prompt=...)`
+```mermaid
+flowchart TD
+    L1["Layer 1 — Custom blocks\nSystemPromptConfig.blocks\nprepended before identity"]
+    L2["Layer 2 — Identity block\nYou are AgentKit…\nomitted when replace_defaults=True"]
+    L3["Layer 3 — Protocol block\ntool-use instructions\nomitted when replace_defaults=True\nor no SWE tools present\nclauses conditional on registered tool families"]
+    L4["Layer 4 — Append block\nSystemPromptConfig.append\nor Agent(system_prompt=...)"]
 
-When `replace_defaults=True`, only blocks 1 and 4 are emitted. Use this for any non-SWE agent.
-
-The protocol block is **tool-aware**: it only describes tools that are actually registered. An agent with only `Read` + custom tools will not see Edit/Bash instructions in its system prompt.
-
-**Invariant:** when the full default toolset is registered and `replace_defaults=False`, the protocol block text must be byte-identical to the hardcoded reference in `tests/test_system_blocks.py`. If you change the wording, update the parity test.
-
----
-
-## Context injection
-
-`ContextInjector.before_turn(ctx: TurnContext)` fires before every provider call. It receives `TurnContext`:
-
-```python
-@dataclass(slots=True)
-class TurnContext:
-    session: Session
-    provider_view: list[Message]   # same object as session.provider_view — mutate freely
-    turn_index: int
-    deps: Any                      # session.run_deps
-    extra_system: list[SystemBlock] # append here; merged into system for this turn only
+    L1 --> L2 --> L3 --> L4
 ```
 
-**Key rules:**
-- `provider_view` mutations persist across turns (intended — injectors own their region).
-- `extra_system` is ephemeral — it is built fresh each turn and not stored.
-- Use `prune_tagged(provider_view, tag)` to remove a prior injection before appending a new one. Without pruning, context grows unboundedly.
-- Multiple injectors fire in registration order; each sees the mutations of the prior.
-- Injectors must not block — use `await` for async I/O.
+**Invariant:** when the full default toolset is registered and `replace_defaults=False`, the protocol block is byte-identical to the pinned reference in `tests/test_system_blocks.py`. Change the wording only intentionally and update the parity test.
 
 ---
 
-## Permissions
+## 10. Structured Output Paths
 
-`PermissionEngine.check_all(pending_calls)` runs before the scheduler. Each call is evaluated against the rule list in order:
+Two independent mechanisms surface the same field: `ResultEvent.structured_output: dict | None`.
 
-1. `ToolRule(tool, decision)` — match by tool name
-2. `PathRule(paths, decision)` — match by file path glob
-3. `BashRule(patterns, decision)` — match bash command patterns
-4. Mode default: `"skip-dangerous"` → auto-approve; `"acceptEdits"` → approve file ops, ask for Bash; `"default"` → always ask
+```mermaid
+flowchart LR
+    subgraph A["Path A — Text Parse\noutput_schema on Agent or RunOptions"]
+        direction TB
+        A1["Provider emits JSON text\nvia response_format or text.format"]
+        A2["_parse_structured_output(final_text, schema)\noptional jsonschema validation"]
+        A3["ResultEvent.structured_output = parsed\nResultEvent.structured_error = msg | None"]
+        A1 --> A2 --> A3
+    end
 
-When a call is not auto-approved, a `PermissionRequestEvent` is emitted and `run_loop` suspends until the caller calls `session.respond_to_permission(call_id, approved)`.
-
----
-
-## Structured output
-
-Two paths, both surface as `ResultEvent.structured_output: dict | None`:
-
-**Text-parse path** (`output_schema` on Agent/RunOptions): the provider is instructed to emit JSON (via `response_format` for Chat API, `text.format` for Responses API). `run_loop` parses `final_text` as JSON after the turn. Validation uses `jsonschema` if installed; otherwise parse-only with `structured_error` set.
-
-**Forced-tool path** (`final_tool_name` on Agent/RunOptions): the model is forced to call a specific tool (set `tool_choice` to match). When `loop.py` sees a `ToolUseBlock` whose name equals `final_tool_name`, it reads `block.input` directly as `structured_output` and returns — the tool is **not** dispatched to the scheduler. This path works across all providers and is more reliable for complex schemas.
-
----
-
-## Compaction
-
-`maybe_compact(session, agent)` is called at the top of each turn. It:
-1. Counts tokens in `provider_view` via `agent.provider.context_window(agent.model)`.
-2. If within threshold, no-op.
-3. Otherwise, calls `_run_compaction_impl(session, agent)` which submits a summarization request via `agent.provider.stream()` and replaces old messages in `provider_view` with the summary.
-
-**Key invariant:** `full_history` is never modified. Only `provider_view` shrinks.
-**Key invariant:** `agent.provider` is used for summarization — not a hardcoded OpenAI call.
-
----
-
-## Sessions and storage
-
-`SessionStore` protocol:
-
-```python
-class SessionStore(Protocol):
-    async def get(self, id: str) -> SessionData | None: ...
-    async def save(self, data: SessionData) -> None: ...
-    async def list(self) -> list[SessionData]: ...
+    subgraph B["Path B — Forced Tool\nfinal_tool_name on Agent or RunOptions"]
+        direction TB
+        B1["Model calls final_tool_name\nstop_reason = tool_use"]
+        B2["loop.py intercepts ToolUseBlock\nbefore scheduler — tool is NOT executed"]
+        B3["ResultEvent.structured_output = block.input"]
+        B1 --> B2 --> B3
+    end
 ```
 
-`InMemorySessionStore` — dict-backed, ephemeral.  
-`SqliteSessionStore` — uses `asyncio.to_thread` for all DB operations; safe for async loops.
-
-Tasks (for `TaskCreate`/`TaskList`/etc.) are also stored via `SessionStore` in the same backing store.
+Path B is more reliable for complex schemas and works across all providers without `response_format` support.
 
 ---
 
-## MCP integration
+## 11. Compaction
 
-`connect_mcp_servers(configs)` returns an `McpConnection`. Each MCP tool is wrapped as an AgentKit tool (duck-typed, not subclassed). Tool names are normalized via `mcp/naming.py` to avoid collisions. The connection is closed on `agent.close()`.
+`maybe_compact(session, agent)` is called at the top of each turn:
 
-MCP is gated by `FeatureFlags(mcp=True)` in `agent.session()`.
+1. Count tokens in `provider_view` via `agent.provider.context_window(agent.model)`.
+2. If within threshold — no-op.
+3. Otherwise submit a summarization request via `agent.provider.stream()` and replace old messages in `provider_view` with the summary, emitting `CompactionEvent`.
 
----
-
-## Skills and subagents
-
-**Skills** are loaded from `.agent_kit/skills/*/SKILL.md`. Each file has YAML frontmatter (name, description, allowed_tools, model_override) and a markdown body. When a skill is invoked, the body is injected as a system reminder per-turn via `_re_inject_skill_context`.
-
-**Subagents** are defined in `.agent_kit/agents.yaml`. `subagents/runner.py` creates a child agent with its own tool overlay and system prompt. The child's system blocks are computed via `agent.build_system_blocks_for_tool_names(child_tool_names)` — not copied from the parent — so the child gets a tool-scoped protocol.
-
-Both are gated by `FeatureFlags`.
+**Invariant:** `full_history` is never modified. Only `provider_view` shrinks. Compaction uses the configured `agent.provider` — never a hardcoded OpenAI call.
 
 ---
 
-## Key invariants (must not break)
+## 12. Skills and Subagents
 
-1. **`full_history` is append-only** — only `loop.py` appends; never write to it elsewhere.
-2. **`provider_view` is the only thing compaction mutates** — `full_history` is untouched.
-3. **Tool protocol is duck-typed** — do not add a base class or `isinstance` check; check for attribute presence.
-4. **`stream()` yields normalized dicts, not API objects** — the loop must not import any provider's raw types.
-5. **Default SWE system-block text is pinned** — `test_system_blocks.py` has a byte-identical parity assertion; change it only intentionally.
-6. **`final_tool_name` tool is never scheduled** — the loop intercepts it before the scheduler.
-7. **Context injectors do not use `full_history`** — they work on `provider_view` only.
-8. **`run_deps` is set once per `run_loop` call** — at the top, from `opts.deps ?? agent.deps`.
+**Skills** are loaded from `.agent_kit/skills/*/SKILL.md`. Each file has YAML frontmatter (`name`, `description`, `allowed_tools`, `model_override`) and a markdown body. When a skill is invoked, the body is injected as a `<system-reminder>` per-turn via `_re_inject_skill_context`. Gated by `FeatureFlags(skills=True)`.
+
+**Subagents** are defined in `.agent_kit/agents.yaml`. `subagents/runner.py` creates a child agent with its own tool overlay and system prompt. The child's system blocks are computed from its own tool names — not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
+
+**MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed AgentKit tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
+
+---
+
+## 13. Key Invariants
+
+These must not break across refactors:
+
+| # | Invariant |
+|---|---|
+| 1 | **`full_history` is append-only** — only `loop.py` appends; never write to it elsewhere. |
+| 2 | **`provider_view` is the only thing compaction mutates** — `full_history` is untouched. |
+| 3 | **Tool protocol is duck-typed** — no base class, no `isinstance`; check attribute presence. |
+| 4 | **`stream()` yields normalized dicts** — the loop must not import any provider's raw types. |
+| 5 | **Default SWE system-block text is pinned** — `test_system_blocks.py` has a byte-identical parity assertion; update it intentionally. |
+| 6 | **`final_tool_name` tool is never scheduled** — the loop intercepts before the scheduler. |
+| 7 | **Context builders do not mutate history** — they receive a `provider_view` snapshot and return ephemeral request context. |
+| 8 | **`run_deps` is set once per `run_loop` call** — at the top, from `opts.deps ?? agent.deps`. |
+| 9 | **Loop guard is on by default** — `Agent()` without `loop_guard=` gets `LoopGuard()` with safe thresholds; disable explicitly with `Agent(loop_guard=None)`. |
+| 10 | **Provider capabilities apply per-request** — `_build_turn_request()` always calls `apply_provider_capabilities()` when the provider has `capabilities()`; no provider receives features it declared unsupported. |

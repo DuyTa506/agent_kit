@@ -16,9 +16,13 @@ from .tools import ToolRegistry, default_tools
 from .types import InvokedSkillRecord, PermissionMode, SystemBlock
 
 if TYPE_CHECKING:
-    from .context_hooks import ContextInjector
+    from .context import ContextBuilder
     from .session import Session
     from .types import OutputSchema, ToolChoice
+
+# Sentinel for "loop_guard not explicitly provided" — distinguishes the
+# default (LoopGuard on) from an explicit None/False (guard disabled).
+_UNSET: Any = object()
 
 
 @dataclass(slots=True)
@@ -37,17 +41,22 @@ class AgentOptions:
     max_output_tokens: int | None = None
     include_partial_messages: bool = False
     max_turns: int | None = None
+    max_tool_concurrency: int | None = None
+    tool_timeout_ms: float | None = None
+    tool_retry: Any = None  # RetryOptions | None
     cache_ttl: str | None = None
     config_dir: str | None = None
     mcp_servers: dict[str, Any] | None = None
     compaction: Any = None
     token_estimator: Any = None
     features: FeatureFlags | None = None
-    context_injectors: list[Any] | None = None
+    context_builder: Any = None
     deps: Any = None
     output_schema: Any = None  # OutputSchema | None
     tool_choice: Any = None  # ToolChoice | None
     final_tool_name: str | None = None
+    loop_guard: Any = None  # LoopGuard | None; None means "use default LoopGuard"
+    observers: list[Any] | None = None  # list[RunObserver] | None
 
 
 class Agent:
@@ -75,6 +84,11 @@ class Agent:
         includePartialMessages: bool | None = None,
         max_turns: int | None = None,
         maxTurns: int | None = None,
+        max_tool_concurrency: int | None = None,
+        maxToolConcurrency: int | None = None,
+        tool_timeout_ms: float | None = None,
+        toolTimeoutMs: float | None = None,
+        tool_retry: Any = None,
         cache_ttl: str | None = None,
         cacheTtl: str | None = None,
         config_dir: str | None = None,
@@ -84,11 +98,14 @@ class Agent:
         compaction: Any = None,
         token_estimator: Any = None,
         features: FeatureFlags | None = None,
-        context_injectors: list[ContextInjector] | None = None,
+        context_builder: ContextBuilder | list[ContextBuilder] | None = None,
         deps: Any = None,
         output_schema: OutputSchema | None = None,
         tool_choice: ToolChoice | None = None,
         final_tool_name: str | None = None,
+        loop_guard: Any = _UNSET,
+        loopGuard: Any = _UNSET,
+        observers: Any = None,
     ) -> None:
         if systemPrompt is not None:
             system_prompt = systemPrompt
@@ -108,6 +125,10 @@ class Agent:
             include_partial_messages = includePartialMessages
         if maxTurns is not None:
             max_turns = maxTurns
+        if maxToolConcurrency is not None:
+            max_tool_concurrency = maxToolConcurrency
+        if toolTimeoutMs is not None:
+            tool_timeout_ms = toolTimeoutMs
         if cacheTtl is not None:
             cache_ttl = cacheTtl
         if configDir is not None:
@@ -178,11 +199,30 @@ class Agent:
         self._config_dir = str(Path(cwd_resolved) / (config_dir or ".agent_kit"))
         self._mcp_servers = mcp_servers
         env_concurrency = os.getenv("AGENTKIT_MAX_TOOL_CONCURRENCY")
-        self.tool_concurrency = (
-            int(env_concurrency)
-            if isinstance(env_concurrency, str) and env_concurrency.isdigit()
-            else (os.cpu_count() or 4)
+        if max_tool_concurrency is None:
+            if env_concurrency is not None:
+                try:
+                    max_tool_concurrency = int(float(env_concurrency))
+                except (ValueError, TypeError):
+                    pass
+            if max_tool_concurrency is None:
+                max_tool_concurrency = os.cpu_count() or 4
+        self.max_tool_concurrency = max(1, int(max_tool_concurrency))
+        self.tool_concurrency = self.max_tool_concurrency
+
+        # Per-tool timeout (AGENTKIT_TOOL_TIMEOUT_MS env; None = no timeout by default).
+        env_timeout = os.getenv("AGENTKIT_TOOL_TIMEOUT_MS")
+        if tool_timeout_ms is None and env_timeout is not None:
+            try:
+                tool_timeout_ms = float(env_timeout)
+            except ValueError:
+                pass
+        self.tool_timeout_ms: float | None = (
+            tool_timeout_ms if (tool_timeout_ms is not None and tool_timeout_ms > 0) else None
         )
+
+        # Optional tool retry config (RetryOptions | None; None = no retry by default).
+        self.tool_retry: Any = tool_retry
 
         self.skills: dict[str, Any] = {}
         self.skill_listing_text: str | None = None
@@ -195,8 +235,8 @@ class Agent:
         # Feature flags (controls which subsystems connect in session())
         self.features: FeatureFlags = features or FeatureFlags()
 
-        # Per-turn context injection hooks
-        self.context_injectors: list[ContextInjector] = list(context_injectors or [])
+        # Per-turn context builder hook
+        self.context_builder: ContextBuilder | list[ContextBuilder] | None = context_builder
 
         # App-state dependency object threaded into ToolContext.deps
         self.deps: Any = deps
@@ -205,6 +245,24 @@ class Agent:
         self.output_schema: OutputSchema | None = output_schema
         self.tool_choice: ToolChoice | None = tool_choice
         self.final_tool_name: str | None = final_tool_name
+
+        # Loop guard: detect repeated identical tool calls and consecutive
+        # failures to prevent runaway loops.  On by default; disable with
+        # Agent(loop_guard=None).
+        from .loop_guard import LoopGuard as _LoopGuard
+        from .loop_guard import normalize_loop_guard as _normalize_loop_guard
+
+        effective_lg = loopGuard if loopGuard is not _UNSET else loop_guard
+        if effective_lg is _UNSET:
+            # Neither parameter was supplied — enable with default thresholds.
+            self.loop_guard: _LoopGuard | None = _LoopGuard()
+        else:
+            self.loop_guard = _normalize_loop_guard(effective_lg)
+
+        # Observability observers — zero-overhead when empty.
+        from .observability import normalize_observers as _normalize_observers
+
+        self._observers: list[Any] = _normalize_observers(observers)
 
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
@@ -240,6 +298,16 @@ class Agent:
     @session_store.setter
     def session_store(self, value: SessionStore | None) -> None:
         self._store = value
+
+    @property
+    def observers(self) -> list[Any]:
+        return self._observers
+
+    @observers.setter
+    def observers(self, value: Any) -> None:
+        from .observability import normalize_observers as _normalize_observers
+
+        self._observers = _normalize_observers(value)
 
     def context_window(self) -> int:
         return self.provider.context_window(self.model)
@@ -552,9 +620,20 @@ class Agent:
             self._mcp_connection = None
         if self._store is not None:
             await self._store.close()
+        import inspect as _inspect
+
+        for obs in self._observers:
+            closer = getattr(obs, "aclose", None) or getattr(obs, "close", None)
+            if closer is not None:
+                try:
+                    result = closer()
+                    if _inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    pass
 
 
 def _normalize_permission_mode(raw: object) -> PermissionMode:
     if raw in {"default", "acceptEdits", "skip-dangerous"}:
         return raw
-    raise ConfigError("permissions.mode must be one of: default, acceptEdits, yolo")
+    raise ConfigError("permissions.mode must be one of: default, acceptEdits, skip-dangerous")

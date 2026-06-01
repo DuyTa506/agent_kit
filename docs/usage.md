@@ -89,11 +89,13 @@ async for event in session.run("hello"):
 ### Model & provider
 
 ```python
+import os
+
 from agent_kit.providers import OpenAIResponsesProvider, OpenAIChatCompletionsProvider
 from agent_kit.openai_responses import OpenAIOptions
 
 # Default: OpenAI Responses API (o-series, gpt-5, …)
-agent = Agent(model="gpt-5", openai_api_key="sk-...")
+agent = Agent(model="gpt-5", openai_api_key=os.environ.get("OPENAI_API_KEY"))
 
 # Chat Completions (gpt-4o, gpt-4-turbo, …)
 agent = Agent(
@@ -104,7 +106,10 @@ agent = Agent(
 # Custom base URL (Azure, local proxy, …)
 agent = Agent(
     model="my-model",
-    openai=OpenAIOptions(api_key="...", base_url="https://..."),
+    openai=OpenAIOptions(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+    ),
 )
 ```
 
@@ -153,7 +158,7 @@ agent = Agent(
 ### Custom tools
 
 ```python
-from agent_kit.tools.base import ToolContext, ToolResult
+from agent_kit.tools.base import ResourceAccess, ToolContext, ToolResult
 from agent_kit.tools.registry import empty_tools, tools_from_defaults
 
 class MyTool:
@@ -165,16 +170,24 @@ class MyTool:
         "required": ["query"],
     }
     scope = "read"          # "read" | "write" | "exec"
-    parallel_safe = True    # can run concurrently with other parallel tools
+    parallel = True         # V2 flag: can run concurrently when scope is read
+    parallel_safe = True    # legacy alias kept for existing tools
 
     def validate(self, raw: dict) -> dict:
         if not raw.get("query"):
             raise ValueError("query is required")
         return raw
 
+    def resources(self, input: dict) -> list[ResourceAccess]:
+        return [ResourceAccess(resource="kb:default", mode="read")]
+
     async def execute(self, input: dict, ctx: ToolContext) -> ToolResult:
         results = await ctx.deps.kb.search(input["query"])  # use deps
-        return ToolResult(content=results, summary=f"search_kb({input['query'][:40]})")
+        return ToolResult(
+            content=results,
+            summary=f"search_kb({input['query'][:40]})",
+            metadata={"query": input["query"]},
+        )
 
     def summarize(self, input: dict) -> str:
         return f"search_kb({input.get('query','')[:40]})"
@@ -187,6 +200,21 @@ from agent_kit.tools.registry import tools_from_defaults
 registry = tools_from_defaults(exclude={"Bash"}, extra=[MyTool()])
 agent = Agent(..., tools=registry)
 ```
+
+The scheduler runs independent read/search tools in parallel, serializes
+write/exec tools, respects `Agent(max_tool_concurrency=...)`, and uses optional
+`ResourceAccess` declarations to avoid read/write conflicts on the same file,
+database, index, or other host-defined resource.
+
+**Timeouts** — set `Agent(tool_timeout_ms=N)` (or env `AGENTKIT_TOOL_TIMEOUT_MS`)
+for an agent-wide deadline. A timed-out tool returns `is_error=True` and the run
+continues. Per-tool override: set `execution_timeout_ms` as a class attribute on
+the tool; `0` opts out of the agent default.
+
+**Retry** — pass `Agent(tool_retry=RetryOptions(max_attempts=3, base_delay_ms=50))`
+to retry on transient failures. Read-scope tools retry any exception (they are
+idempotent); write/exec tools only retry when the tool declares `retryable = True`.
+`AbortError` is never retried.
 
 ### Dependencies (shared app state)
 
@@ -247,39 +275,117 @@ agent = Agent(..., output_schema=schema)
 # result.structured_output → {"total": 42.50, "line_items": [...]}
 ```
 
-### Per-turn context injection (RAG)
+### Per-turn context building (RAG)
 
 ```python
-from agent_kit.context_hooks import ContextInjector, TurnContext, prune_tagged
+from agent_kit.context import ContextBudget, ContextBuildResult
 from agent_kit.types import Message, TextBlock
 
 TAG = "[[ctx]]"
 
-class MyInjector:
-    async def before_turn(self, ctx: TurnContext) -> None:
-        prune_tagged(ctx.provider_view, TAG)   # remove last turn's injections
-        docs = await ctx.deps.search(last_query(ctx))
-        if docs:
-            ctx.provider_view.append(Message(
-                role="user",
-                content=[TextBlock(text=f"{TAG}\n{docs}")],
-            ))
+class MyContextBuilder:
+    async def build(self, turn) -> ContextBuildResult:
+        docs = await turn.deps.search(last_query(turn.messages))
+        if not docs:
+            return ContextBuildResult()
+        return ContextBuildResult(
+            messages=[
+                Message(role="user", content=[TextBlock(text=f"{TAG}\n{docs}")])
+            ],
+            budget=ContextBudget(max_tokens=800),
+            metadata={"source": "my_store"},
+        )
 
-agent = Agent(..., context_injectors=[MyInjector()], deps=my_store)
+agent = Agent(..., context_builder=MyContextBuilder(), deps=my_store)
 ```
+
+### Memory and RAG primitives
+
+```python
+from agent_kit import Agent
+from agent_kit.memory import (
+    InMemoryKeywordMemoryStore,
+    MemoryContextBuilder,
+    MemoryItem,
+    MemorySearchTool,
+)
+from agent_kit.tools.registry import empty_tools
+
+store = InMemoryKeywordMemoryStore()
+await store.upsert([
+    MemoryItem(id="m1", content="ToolResult can carry citations.", namespace="docs")
+])
+
+agent = Agent(
+    ...,
+    deps=store,
+    context_builder=MemoryContextBuilder(namespace="docs", max_tokens=800),
+    tools=empty_tools(MemorySearchTool(namespace="docs")),
+)
+```
+
+Core includes `MemoryStore` protocols, in-memory keyword memory, SQLite memory,
+and memory search/upsert tools. Vector databases and embedding models stay in
+the host app or a recipe.
 
 ---
 
 ## See `examples/` for runnable code
 
+Examples are organized by subsystem. Local demos (marked *local*) run without
+a live API key.
+
+**`core/`**
+
 | File | What it shows |
 |------|---------------|
-| `01_custom_tools.py` | 5 tool patterns: read, write, exec, parallel, with deps |
-| `02_custom_permissions.py` | All permission modes and rule types |
-| `03_system_prompts.py` | append, replace, per-session override, persona patterns |
-| `04_structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
-| `05_context_injection.py` | RAG per-turn, sliding-window context, per-turn schema inject |
-| `06_multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
-| `07_event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
-| `minimal_agent.py` | Smallest possible agent |
-| `interactive_cli.py` | Interactive REPL |
+| `core/minimal_agent.py` | Smallest possible agent |
+| `core/custom_permissions.py` | All permission modes and rule types |
+| `core/system_prompts.py` | append, replace, per-session override, persona patterns |
+| `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
+| `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
+| `core/multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
+| `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
+| `core/interactive_cli.py` | Interactive REPL |
+
+**`tools/`** — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `tools/custom_tools.py` | 5 tool patterns: read, write, exec, parallel, with deps |
+| `tools/parallel_search_agent.py` | Scheduler V2: parallel search, resources, concurrency cap |
+| `tools/runtime_tools.py` | Runtime registry add/remove/replace/select and schema export |
+| `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out (`execution_timeout_ms=0`), `RetryOptions` |
+
+**`context/`** — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `context/context_injection.py` | ContextBuilder patterns: RAG per-turn, budget, selected tools |
+| `context/rag_context_builder.py` | First-class ContextBuilder RAG with metadata and budget reporting |
+
+**`memory/`** — *local demos available*
+
+| File | What it shows |
+|------|---------------|
+| `memory/memory_agent.py` | Core memory primitives with search/upsert tools and citations |
+| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert update |
+
+**`observability/`**
+
+| File | What it shows |
+|------|---------------|
+| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
+| `observability/custom_observer.py` | BaseObserver subclass: latency tracking, error counts per tool |
+
+**`providers/`**
+
+| File | What it shows |
+|------|---------------|
+| `providers/anthropic_agent.py` | AnthropicProvider, extended thinking, prompt caching |
+
+**`integrations/`** — *local demo available*
+
+| File | What it shows |
+|------|---------------|
+| `integrations/subagent_coordinator.py` | Agent definition files, tool-filtered subagents, SubagentEvent |

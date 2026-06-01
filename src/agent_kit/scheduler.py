@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .abort import AbortContext, throw_if_aborted
-from .errors import AbortError
+from .errors import AbortError, ToolTimeoutError
 from .events import (
     Event,
     PermissionRequestEvent,
@@ -18,7 +18,8 @@ from .events import (
     ToolCallStartEvent,
 )
 from .permissions import PendingToolCall, PermissionDecision
-from .tools import ToolContext
+from .providers.retry import RetryOptions, _delay_for_error
+from .tools import ResourceAccess, ToolContext
 from .types import ToolResultBlock, ToolUseBlock
 
 
@@ -137,58 +138,258 @@ async def _execute_one(
         )
 
     tool = call.tool
+    result_timeout_ms = _tool_timeout_ms(agent, tool)
+    opts = _retry_options(agent)
+    max_attempts = opts.max_attempts if opts is not None else 1
     started = time.perf_counter()
+    last_exc: Exception | None = None
+
+    ctx = ToolContext(
+        cwd=agent.cwd,
+        session_id=session.id,
+        run_id=session.active_run_id or "unknown",
+        session_store=session.store,
+        signal=signal,
+        file_read_tracker=getattr(session, "file_read_tracker", None),
+        deps=getattr(session, "run_deps", None),
+    )
+
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            throw_if_aborted(signal)
+            delay_ms = _delay_for_error(last_exc or Exception(), attempt - 1, opts)  # type: ignore[arg-type]
+            await asyncio.sleep(delay_ms / 1000.0)
+
+        attempt_start = time.perf_counter()
+        try:
+            coro = tool.execute(_effective_input(call, decision), ctx)
+            if result_timeout_ms is None:
+                result = await coro
+            else:
+                result = await asyncio.wait_for(coro, timeout=result_timeout_ms / 1000.0)
+            elapsed = int((time.perf_counter() - attempt_start) * 1000)
+            if result.duration_ms <= 0:
+                result.duration_ms = elapsed
+            return (
+                ToolResultBlock(
+                    tool_use_id=call.id,
+                    content=result.content,
+                    is_error=result.is_error,
+                ),
+                result.duration_ms,
+            )
+        except AbortError:
+            raise
+        except asyncio.TimeoutError:
+            # result_timeout_ms may be None if the tool raised asyncio.TimeoutError
+            # internally (its own deadline) with no agent-wide timeout set.
+            ms: int | str = int(result_timeout_ms) if result_timeout_ms is not None else "unknown"
+            te: Exception = ToolTimeoutError(f"Tool '{_tool_name(call)}' timed out after {ms}ms")
+            last_exc = te
+            if _tool_retryable(call, te) and attempt < max_attempts - 1:
+                continue
+            return (
+                ToolResultBlock(
+                    tool_use_id=call.id,
+                    content=(
+                        f"Tool '{_tool_name(call)}' timed out after {ms}ms"
+                        " — retry with a larger timeout or narrower input."
+                    ),
+                    is_error=True,
+                ),
+                int((time.perf_counter() - started) * 1000),
+            )
+        except Exception as exc:
+            last_exc = exc
+            if _tool_retryable(call, exc) and attempt < max_attempts - 1:
+                continue
+            return (
+                ToolResultBlock(
+                    tool_use_id=call.id,
+                    content=f"Tool failed: {exc}",
+                    is_error=True,
+                ),
+                int((time.perf_counter() - started) * 1000),
+            )
+
+    # Defensive fallback — all attempts exhausted (should be unreachable because
+    # the loop always returns or continues, but satisfies the type-checker).
+    return (
+        ToolResultBlock(
+            tool_use_id=call.id,
+            content=(
+                f"Tool '{_tool_name(call)}' failed after {max_attempts}"
+                f" attempt{'s' if max_attempts != 1 else ''}: {last_exc}"
+            ),
+            is_error=True,
+        ),
+        int((time.perf_counter() - started) * 1000),
+    )
+
+
+def _tool_scope(call: ResolvedCall) -> str:
+    return str(getattr(call.tool, "scope", "exec")) if call.tool is not None else "exec"
+
+
+def _tool_parallel(call: ResolvedCall) -> bool:
+    if call.is_immediate_error or call.tool is None:
+        return False
+    if _tool_scope(call) != "read":
+        return False
+    return bool(getattr(call.tool, "parallel", getattr(call.tool, "parallel_safe", False)))
+
+
+def _resource_accesses(call: ResolvedCall) -> list[ResourceAccess]:
+    if call.is_immediate_error or call.tool is None:
+        return []
+    resources = getattr(call.tool, "resources", None)
+    if callable(resources):
+        try:
+            raw = resources(call.input)
+        except Exception:
+            if _tool_scope(call) == "read":
+                return []
+            return [ResourceAccess(resource=f"tool:{_tool_name(call)}", mode="write")]
+        if raw is None:
+            return []
+        result: list[ResourceAccess] = []
+        for item in raw:
+            if isinstance(item, ResourceAccess):
+                result.append(item)
+            elif isinstance(item, dict):
+                resource = item.get("resource")
+                mode = item.get("mode", "read")
+                if isinstance(resource, str) and mode in {"read", "write"}:
+                    result.append(ResourceAccess(resource=resource, mode=mode))
+        return result
+    return []
+
+
+def _resources_conflict(left: list[ResourceAccess], right: list[ResourceAccess]) -> bool:
+    for a in left:
+        for b in right:
+            if a.resource == b.resource and (a.mode == "write" or b.mode == "write"):
+                return True
+    return False
+
+
+def _max_concurrency(agent: Any) -> int:
+    raw = getattr(agent, "max_tool_concurrency", None)
+    if raw is None:
+        raw = getattr(agent, "tool_concurrency", None)
     try:
-        ctx = ToolContext(
-            cwd=agent.cwd,
-            session_id=session.id,
-            run_id=session.active_run_id or "unknown",
-            session_store=session.store,
-            signal=signal,
-            file_read_tracker=getattr(session, "file_read_tracker", None),
-            deps=getattr(session, "run_deps", None),
-        )
-        result = await tool.execute(_effective_input(call, decision), ctx)
-        elapsed = int((time.perf_counter() - started) * 1000)
-        if result.duration_ms <= 0:
-            result.duration_ms = elapsed
-        return (
-            ToolResultBlock(
-                tool_use_id=call.id,
-                content=result.content,
-                is_error=result.is_error,
-            ),
-            result.duration_ms,
-        )
-    except AbortError:
-        raise
-    except Exception as exc:
-        return (
-            ToolResultBlock(
-                tool_use_id=call.id,
-                content=f"Tool failed: {exc}",
-                is_error=True,
-            ),
-            int((time.perf_counter() - started) * 1000),
-        )
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, value)
+
+
+def _tool_timeout_ms(agent: Any, tool: Any) -> float | None:
+    """Resolve the execution timeout for a tool.
+
+    Precedence: per-tool ``execution_timeout_ms`` class attribute
+    → ``agent.tool_timeout_ms`` default → ``None`` (no timeout).
+
+    A value of ``0`` or negative on the tool acts as an explicit opt-out
+    even when an agent-wide default is set (e.g. Bash managing its own
+    subprocess timeout).
+    """
+    if tool is not None:
+        raw = getattr(tool, "execution_timeout_ms", None)
+        if raw is not None:
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                v = 0.0
+            return v if v > 0 else None  # 0 / negative = explicit opt-out
+    raw = getattr(agent, "tool_timeout_ms", None)
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def _retry_options(agent: Any) -> RetryOptions | None:
+    """Return ``RetryOptions`` from ``agent.tool_retry``, or ``None`` (no retry)."""
+    val = getattr(agent, "tool_retry", None)
+    if isinstance(val, RetryOptions):
+        return val
+    return None
+
+
+def _tool_retryable(call: ResolvedCall, exc: Exception) -> bool:
+    """True when the exception is safe to retry for this call.
+
+    Read-scope tools are always retried on any exception — they are idempotent
+    by design, so any failure is safe to retry.
+
+    Write / exec tools are never retried by default (side-effect risk); a tool
+    may opt in by setting a class-level ``retryable = True`` attribute, or an
+    exception may carry ``retryable = True`` (e.g. ``ToolTimeoutError``).
+
+    ``AbortError`` is never seen here — it is re-raised before the retry
+    predicate is consulted.
+    """
+    tool = call.tool
+    opt_in = bool(getattr(tool, "retryable", False)) if tool is not None else False
+    if opt_in or _tool_scope(call) == "read":
+        return True
+    return bool(getattr(exc, "retryable", False))
 
 
 def _partition_batches(
     resolved: list[ResolvedCall],
     decisions: list[PermissionDecision],
+    *,
+    max_concurrency: int,
 ) -> list[dict[str, Any]]:
+    pending = [
+        {
+            "call": call,
+            "idx": i,
+            "decision": decisions[i],
+            "resources": _resource_accesses(call),
+            "parallel": _tool_parallel(call),
+        }
+        for i, call in enumerate(resolved)
+    ]
     batches: list[dict[str, Any]] = []
-    for i, call in enumerate(resolved):
-        parallel = not call.is_immediate_error and call.tool is not None and call.tool.parallel_safe
-        if batches and batches[-1]["parallel"] and parallel:
-            batches[-1]["calls"].append((call, i, decisions[i]))
-        else:
+
+    while pending:
+        first = pending[0]
+        if not first["parallel"]:
             batches.append(
                 {
-                    "parallel": parallel,
-                    "calls": [(call, i, decisions[i])],
+                    "parallel": False,
+                    "calls": [(first["call"], first["idx"], first["decision"])],
                 }
             )
+            pending = pending[1:]
+            continue
+
+        selected: list[dict[str, Any]] = []
+        selected_resources: list[ResourceAccess] = []
+        for item in pending:
+            if len(selected) >= max_concurrency:
+                break
+            if not item["parallel"]:
+                break
+            resources = item["resources"]
+            if _resources_conflict(selected_resources, resources):
+                break
+            selected.append(item)
+            selected_resources.extend(resources)
+
+        batches.append(
+            {
+                "parallel": len(selected) > 1,
+                "calls": [(item["call"], item["idx"], item["decision"]) for item in selected],
+            }
+        )
+        pending = pending[len(selected) :]
     return batches
 
 
@@ -269,8 +470,12 @@ async def execute_tool_calls(
                 reason=f"Permission resolution failed for {_tool_name(call)}",
             )
 
-    # Partition into batches by parallelSafe
-    batches = _partition_batches(resolved, decisions)
+    # Partition into bounded, resource-aware batches.
+    batches = _partition_batches(
+        resolved,
+        decisions,
+        max_concurrency=_max_concurrency(agent),
+    )
 
     # Execute batches in order
     result_pairs: list[tuple[int, ToolResultBlock]] = []
@@ -346,7 +551,7 @@ async def execute_tool_calls(
 
             try:
                 results = await asyncio.gather(*tasks)
-            except AbortError:
+            except (AbortError, asyncio.CancelledError):
                 for t in tasks:
                     t.cancel()
                 # Orphan-bracket synthesis

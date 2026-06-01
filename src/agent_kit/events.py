@@ -112,6 +112,16 @@ class CompactionEvent:
 
 
 @dataclass(slots=True)
+class ContextBuildEvent:
+    system_blocks: int
+    messages: int
+    selected_tools: list[str] | None
+    budget: dict[str, Any]
+    metadata: dict[str, Any]
+    type: Literal["context_build"] = "context_build"
+
+
+@dataclass(slots=True)
 class SkillsLoadedEvent:
     skills: list[dict[str, Any]]
     type: Literal["skills_loaded"] = "skills_loaded"
@@ -143,6 +153,26 @@ class SubagentEvent:
     type: Literal["subagent_event"] = "subagent_event"
 
 
+@dataclass(slots=True)
+class LoopGuardEvent:
+    """Emitted when the loop guard trips or when ``max_turns`` is reached.
+
+    Attributes:
+        reason: Machine-readable tag for the trip condition.  One of
+            ``"repeated_tool_call"``, ``"repeated_failures"``, or
+            ``"max_turns"``.
+        detail: Human-readable description of why the guard tripped.
+        action: What the loop did in response — ``"stop"`` (hard error
+            termination) or ``"force_final"`` (one tools-disabled turn
+            injected before stopping).
+    """
+
+    reason: str
+    detail: str
+    action: str
+    type: Literal["loop_guard"] = "loop_guard"
+
+
 Event: TypeAlias = (
     SystemEvent
     | UserEvent
@@ -153,12 +183,14 @@ Event: TypeAlias = (
     | PermissionRequestEvent
     | UsageEvent
     | CompactionEvent
+    | ContextBuildEvent
     | ResultEvent
     | ErrorEvent
     | SkillsLoadedEvent
     | SkillInvokedEvent
     | SkillCompletedEvent
     | SubagentEvent
+    | LoopGuardEvent
 )
 
 
@@ -198,6 +230,10 @@ def is_compaction_event(e: Event) -> bool:
     return e.type == "compaction"  # type: ignore[comparison-overlap]
 
 
+def is_context_build_event(e: Event) -> bool:
+    return e.type == "context_build"  # type: ignore[comparison-overlap]
+
+
 def is_result_event(e: Event) -> bool:
     return e.type == "result"  # type: ignore[comparison-overlap]
 
@@ -220,6 +256,10 @@ def is_skill_completed_event(e: Event) -> bool:
 
 def is_subagent_event(e: Event) -> bool:
     return e.type == "subagent_event"  # type: ignore[comparison-overlap]
+
+
+def is_loop_guard_event(e: Event) -> bool:
+    return e.type == "loop_guard"  # type: ignore[comparison-overlap]
 
 
 def usage_to_dict(usage: Usage) -> dict[str, int]:
@@ -308,6 +348,15 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "tokens_after": event.tokens_after,
             "strategy": event.strategy,
         }
+    if typ == "context_build":
+        return {
+            "type": event.type,
+            "system_blocks": event.system_blocks,
+            "messages": event.messages,
+            "selected_tools": event.selected_tools,
+            "budget": dict(event.budget),
+            "metadata": dict(event.metadata),
+        }
     if typ == "result":
         d: dict[str, Any] = {
             "type": event.type,
@@ -344,6 +393,13 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "subagent_type": event.subagent_type,
             "display_name": event.display_name,
             "event": event_to_dict(event.event),
+        }
+    if typ == "loop_guard":
+        return {
+            "type": event.type,
+            "reason": event.reason,
+            "detail": event.detail,
+            "action": event.action,
         }
     raise ValueError(f"unknown event type: {typ}")
 
@@ -411,6 +467,17 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             tokens_after=int(raw.get("tokens_after", 0) or 0),
             strategy=str(raw.get("strategy", "")),
         )
+    if typ == "context_build":
+        selected_raw = raw.get("selected_tools")
+        return ContextBuildEvent(
+            system_blocks=int(raw.get("system_blocks", 0) or 0),
+            messages=int(raw.get("messages", 0) or 0),
+            selected_tools=(
+                [str(t) for t in selected_raw] if isinstance(selected_raw, list) else None
+            ),
+            budget=dict(raw.get("budget", {})),
+            metadata=dict(raw.get("metadata", {})),
+        )
     if typ == "result":
         so_raw = raw.get("structured_output")
         se_raw = raw.get("structured_error")
@@ -453,5 +520,11 @@ def event_from_dict(raw: dict[str, Any]) -> Event:
             subagent_type=str(raw.get("subagent_type", "")),
             display_name=str(raw.get("display_name", "")),
             event=event_from_dict(nested),
+        )
+    if typ == "loop_guard":
+        return LoopGuardEvent(
+            reason=str(raw.get("reason", "")),
+            detail=str(raw.get("detail", "")),
+            action=str(raw.get("action", "stop")),
         )
     raise ValueError(f"unknown event type: {typ!r}")

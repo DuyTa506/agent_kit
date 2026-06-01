@@ -10,7 +10,7 @@ from agent_kit.openai_responses import (
     context_window,
     map_wire_events,
 )
-from agent_kit.providers.base import BaseProvider
+from agent_kit.providers.base import BaseProvider, ProviderCapabilities
 from agent_kit.types import ModelId, ProviderRequest
 
 
@@ -38,6 +38,15 @@ class OpenAIResponsesProvider(BaseProvider):
 
     def context_window(self, model: ModelId) -> int:
         return context_window(model)
+
+    def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            parallel_tool_calls=True,
+            structured_output=True,
+            tool_choice=True,
+            prompt_cache=False,
+        )
 
     async def stream(self, req: ProviderRequest) -> AsyncIterator[dict[str, object]]:
         wire = self._client.stream(req)

@@ -124,7 +124,7 @@ async def test_live_structured_output():
 @needs_key
 @pytest.mark.asyncio
 async def test_live_final_tool_sql():
-    """final_tool_name terminates the loop and returns structured output without executing the tool."""
+    """final_tool_name returns structured output without executing the tool."""
     from agent_kit import Agent
     from agent_kit.config import FeatureFlags, SystemPromptConfig
     from agent_kit.sessions import InMemorySessionStore
@@ -177,7 +177,8 @@ async def test_live_final_tool_sql():
             replace_defaults=True,
             append=(
                 f"You are a SQL assistant. Database schema:\n```sql\n{db_schema}\n```\n\n"
-                "When you know the answer, call the emit_sql tool with the SQL query and a brief rationale. "
+                "When you know the answer, call the emit_sql tool with the SQL "
+                "query and a brief rationale. "
                 "Do NOT answer in plain text — always call emit_sql."
             ),
         ),
@@ -296,22 +297,22 @@ async def test_live_tool_deps():
     assert deps_received_in_tool[0] is kb, "ctx.deps is not the kb dict"
 
 
-# ── 5. Context injection (RAG-per-turn) ───────────────────────────────────────
+# ── 5. Context building (RAG-per-turn) ────────────────────────────────────────
 
 
 @needs_key
 @pytest.mark.asyncio
 async def test_live_context_injection():
-    """ContextInjector injects retrieved docs into provider_view before each turn."""
+    """ContextBuilder injects retrieved docs into provider requests before each turn."""
     from agent_kit import Agent
     from agent_kit.config import FeatureFlags, SystemPromptConfig
-    from agent_kit.context_hooks import ContextInjector, TurnContext, prune_tagged
+    from agent_kit.context import ContextBuildResult
     from agent_kit.sessions import InMemorySessionStore
     from agent_kit.tools.registry import empty_tools
     from agent_kit.types import Message, TextBlock
 
     TAG = "[[docs]]"
-    injector_called_with_deps = []
+    builder_called_with_deps = []
 
     # Minimal fake vector store — just a dict keyed by topic
     class FakeVectorStore:
@@ -326,14 +327,13 @@ async def test_live_context_injection():
 
     store = FakeVectorStore()
 
-    class RagInjector:
-        async def before_turn(self, ctx: TurnContext) -> None:
-            prune_tagged(ctx.provider_view, TAG)
-            injector_called_with_deps.append(ctx.deps)
-            # Retrieve from deps (the vector store passed as Agent(deps=...))
-            vs = ctx.deps
+    class RagContextBuilder:
+        async def build(self, turn) -> ContextBuildResult:
+            builder_called_with_deps.append(turn.deps)
+            # Retrieve from deps (the vector store passed as Agent(deps=...)).
+            vs = turn.deps
             last_text = ""
-            for msg in reversed(ctx.provider_view):
+            for msg in reversed(turn.messages):
                 if msg.role == "user":
                     for blk in msg.content:
                         if isinstance(blk, TextBlock) and not blk.text.startswith("<env>"):
@@ -343,12 +343,15 @@ async def test_live_context_injection():
                     break
             docs = vs.search(last_text)
             if docs:
-                ctx.provider_view.append(
-                    Message(
-                        role="user",
-                        content=[TextBlock(text=f"{TAG} Retrieved: {docs}")],
-                    )
+                return ContextBuildResult(
+                    messages=[
+                        Message(
+                            role="user",
+                            content=[TextBlock(text=f"{TAG} Retrieved: {docs}")],
+                        )
+                    ]
                 )
+            return ContextBuildResult()
 
     agent = Agent(
         model=MODEL,
@@ -360,7 +363,7 @@ async def test_live_context_injection():
             ),
         ),
         tools=empty_tools(),
-        context_injectors=[RagInjector()],
+        context_builder=RagContextBuilder(),
         deps=store,
         features=FeatureFlags(skills=False, subagents=False, mcp=False),
         session_store=InMemorySessionStore(),
@@ -377,9 +380,9 @@ async def test_live_context_injection():
     # The injected weather doc should have been used
     assert "22" in result.final_text or "tokyo" in result.final_text.lower()
 
-    # Injector was called and received the vector store as deps
-    assert len(injector_called_with_deps) >= 1
-    assert injector_called_with_deps[0] is store
+    # Builder was called and received the vector store as deps.
+    assert len(builder_called_with_deps) >= 1
+    assert builder_called_with_deps[0] is store
 
 
 # ── 6. FeatureFlags + SystemPromptConfig.replace_defaults ─────────────────────
@@ -468,7 +471,10 @@ async def test_live_run_options_deps_override():
         model=MODEL,
         system_prompt_config=SystemPromptConfig(
             replace_defaults=True,
-            append="You are a database assistant. Call get_db_info to answer questions about the database.",
+            append=(
+                "You are a database assistant. Call get_db_info to answer "
+                "questions about the database."
+            ),
         ),
         tools=empty_tools(DbInfoTool()),
         deps=db_a,  # agent-level default

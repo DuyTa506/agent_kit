@@ -2,7 +2,10 @@
 
 AgentKit is a Python SDK for building agent loops you embed in your own application. It is async-first, event-driven, and provider-agnostic — designed as a **harnessing framework** you build domain workflows on top of.
 
-Core capabilities: streaming events, per-turn context injection (RAG), structured output, typed tool protocol, permission engine, MCP/skills/subagents, pluggable providers.
+Core capabilities: streaming events, resource-aware parallel tool scheduling,
+per-tool timeout + opt-in retry, first-class context building (RAG), memory/RAG
+primitives, structured output, rich tool results with citations/metadata, runtime
+tool registries, permission engine, MCP/skills/subagents, and pluggable providers.
 
 ## Install
 
@@ -18,14 +21,19 @@ pip install -e '.[dev,mcp,anthropic]'
 
 ## Minimal agent
 
+This snippet reads the API key from the environment. Do not hard-code keys in
+source files or documentation.
+
 ```python
 import asyncio
+import os
+
 from agent_kit import Agent
 from agent_kit.sessions import InMemorySessionStore
 
 agent = Agent(
     model="gpt-5",
-    openai_api_key="sk-...",
+    openai_api_key=os.environ.get("OPENAI_API_KEY"),
     session_store=InMemorySessionStore(),
     permissions={"mode": "skip-dangerous"},
 )
@@ -39,14 +47,36 @@ async def main():
 asyncio.run(main())
 ```
 
+For local runs, put `OPENAI_API_KEY=...` in `.env` or export it in your shell.
+Never commit `.env`.
+
+## Safe Local Demos
+
+These examples run useful local code paths without requiring a live provider
+call. They load `./.env` automatically when present, but never print secret
+values.
+
+```sh
+python3 examples/tools/parallel_search_agent.py
+python3 examples/tools/runtime_tools.py
+python3 examples/context/rag_context_builder.py
+python3 examples/memory/memory_agent.py
+python3 examples/tools/tool_reliability_agent.py
+python3 examples/memory/sqlite_memory_agent.py
+```
+
+The scripts skip live agent calls when `OPENAI_API_KEY` is missing. When a key
+is present, only the examples with explicit live sections make provider calls.
+
 ## Public API
 
-- `agent_kit`: `Agent`, `Session`, events, types, errors, `empty_tools`, `tools_from_defaults`
+- `agent_kit`: `Agent`, `Session`, events, types, errors, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
 - `agent_kit.config`: `FeatureFlags`, `SystemPromptConfig`
-- `agent_kit.context_hooks`: `ContextInjector`, `TurnContext`, `prune_tagged`
+- `agent_kit.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
+- `agent_kit.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
 - `agent_kit.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
 - `agent_kit.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`
-- `agent_kit.tools`: duck-typed tool protocol, `ToolRegistry`, built-in tools
+- `agent_kit.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
 - `agent_kit.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
 - `agent_kit.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`
 - `agent_kit.recipes`: scaffold factories (`rag_agent`, `sql_agent`, `doc_agent`, `build_agent`)
@@ -58,20 +88,69 @@ asyncio.run(main())
 | [`docs/usage.md`](docs/usage.md) | Getting started — install, config knobs, providers, tools, deps, structured output, RAG |
 | [`docs/architecture.md`](docs/architecture.md) | Internal data flow, module contracts, design invariants |
 | [`docs/contributing.md`](docs/contributing.md) | Dev setup, code rules, test conventions, PR checklist |
-| [`examples/`](examples/) | Runnable scripts (set `OPENAI_API_KEY`) |
+| [`examples/`](examples/) | Runnable scripts; local demos are safe without a key, live demos use `OPENAI_API_KEY` |
 
 ## Examples
 
+Examples are organized by subsystem under `examples/`.
+
+**`examples/core/`** — agent fundamentals
+
 | File | What it shows |
 |------|---------------|
-| `examples/minimal_agent.py` | Smallest possible agent |
-| `examples/01_custom_tools.py` | Tool patterns: read, write, exec, parallel, deps |
-| `examples/02_custom_permissions.py` | Permission modes and rule types |
-| `examples/03_system_prompts.py` | append, replace, per-session, persona |
-| `examples/04_structured_output.py` | OutputSchema, final_tool_name, extraction |
-| `examples/05_context_injection.py` | RAG per-turn, sliding-window, vector search |
-| `examples/06_multi_session.py` | One Agent, many users, persistent sessions |
-| `examples/07_event_streaming.py` | SSE, WebSocket, CLI progress |
+| `core/minimal_agent.py` | Smallest possible agent |
+| `core/custom_permissions.py` | Permission modes and rule types |
+| `core/system_prompts.py` | append, replace, per-session, persona |
+| `core/structured_output.py` | OutputSchema, final_tool_name, extraction |
+| `core/event_streaming.py` | SSE, WebSocket, CLI progress |
+| `core/multi_session.py` | One Agent, many users, persistent sessions |
+| `core/loop_guard_agent.py` | LoopGuard — repeated tool call detection |
+| `core/interactive_cli.py` | Interactive REPL |
+
+**`examples/tools/`** — tool patterns and scheduler
+
+| File | What it shows |
+|------|---------------|
+| `tools/custom_tools.py` | Tool patterns: read, write, exec, parallel, deps |
+| `tools/parallel_search_agent.py` | Scheduler V2: parallel reads, resources, concurrency cap |
+| `tools/runtime_tools.py` | Runtime `ToolRegistry.add/remove/replace/select` and schema export |
+| `tools/tool_reliability_agent.py` | Timeout, per-tool opt-out, retry with `RetryOptions` |
+
+**`examples/context/`** — RAG and context building
+
+| File | What it shows |
+|------|---------------|
+| `context/context_injection.py` | ContextBuilder patterns: RAG per-turn, budget, tool selection |
+| `context/rag_context_builder.py` | First-class ContextBuilder RAG with metadata and budget reporting |
+
+**`examples/memory/`** — memory primitives
+
+| File | What it shows |
+|------|---------------|
+| `memory/memory_agent.py` | Core memory primitives, search/upsert tools, ToolResult citations |
+| `memory/sqlite_memory_agent.py` | SqliteMemoryStore — persistent memory, round-trip, upsert |
+
+**`examples/observability/`** — observers and tracing
+
+| File | What it shows |
+|------|---------------|
+| `observability/observability_agent.py` | LoggingObserver + optional OpenTelemetryObserver |
+| `observability/custom_observer.py` | BaseObserver subclass: latency tracking, error counts |
+
+**`examples/providers/`** — provider-specific features
+
+| File | What it shows |
+|------|---------------|
+| `providers/anthropic_agent.py` | AnthropicProvider, thinking blocks, prompt caching |
+
+**`examples/integrations/`** — subagents, skills, MCP
+
+| File | What it shows |
+|------|---------------|
+| `integrations/subagent_coordinator.py` | Agent definitions, tool-filtered subagents, SubagentEvent |
+
+Use the safe local demos above for README-friendly behavior. Other examples may
+make live provider calls when `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is configured.
 
 ## Development
 

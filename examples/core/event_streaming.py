@@ -40,6 +40,7 @@ BASE = dict(
 
 # ── 1. Print every event ──────────────────────────────────────────────────────
 
+
 async def demo_all_events() -> None:
     print("\n── 1. All event types ──")
     agent = Agent(
@@ -78,6 +79,7 @@ async def demo_all_events() -> None:
 
 # ── 2. Progressive text streaming ────────────────────────────────────────────
 
+
 async def demo_streaming_text() -> None:
     print("\n── 2. Streaming text (partial_assistant events) ──")
     agent = Agent(
@@ -104,6 +106,7 @@ async def demo_streaming_text() -> None:
 
 # ── 3. Tool call observer ─────────────────────────────────────────────────────
 
+
 async def demo_tool_observer() -> None:
     print("\n── 3. Tool call observer ──")
     agent = Agent(
@@ -123,12 +126,13 @@ async def demo_tool_observer() -> None:
         elif event.type == "tool_call_end":
             elapsed = time.monotonic() - pending_starts.pop(event.tool_use_id, time.monotonic())
             status = "✓" if not event.is_error else "✗"
-            print(f"  {status} {event.tool_name:15} | {elapsed*1000:.0f}ms")
+            print(f"  {status} {event.tool_name:15} | {elapsed * 1000:.0f}ms")
         elif event.type == "result":
             print(f"  Answer: {event.final_text[:120]}")
 
 
 # ── 4. Usage tracking ─────────────────────────────────────────────────────────
+
 
 async def demo_usage_tracking() -> None:
     print("\n── 4. Usage tracking across turns ──")
@@ -161,6 +165,7 @@ async def demo_usage_tracking() -> None:
 #
 # event_to_dict() + event_from_dict() let you serialise events for SSE / WS.
 # In a FastAPI route you'd yield these as text/event-stream data.
+
 
 def to_sse_line(event) -> str:
     """Format an event as a Server-Sent Events data line."""
@@ -207,6 +212,7 @@ async def demo_sse_format() -> None:
 
 # ── 6. Progress bar ───────────────────────────────────────────────────────────
 
+
 async def demo_progress() -> None:
     print("\n── 6. Terminal progress indicator ──")
     agent = Agent(
@@ -222,9 +228,7 @@ async def demo_progress() -> None:
     current_step = "Starting…"
 
     print("  ", end="", flush=True)
-    async for event in session.run(
-        "Read pyproject.toml and list the direct dependencies."
-    ):
+    async for event in session.run("Read pyproject.toml and list the direct dependencies."):
         if event.type == "tool_call_start":
             current_step = f"{event.tool_name}({event.summary[:25]})"
         elif event.type == "tool_call_end":
@@ -245,6 +249,7 @@ async def demo_progress() -> None:
 #
 # session.abort() signals the running loop to stop. The current tool call
 # and stream are cancelled. A ResultEvent(subtype="aborted") is emitted.
+
 
 async def demo_abort() -> None:
     print("\n── 7. Abort mid-run ──")

@@ -40,6 +40,7 @@ MODEL = "gpt-5-nano-2025-08-07"
 # Create one Agent at startup. For each user, call agent.session().
 # Sessions are independent — Alice's history never bleeds into Bob's.
 
+
 async def demo_multi_user() -> None:
     print("\n── 1. Multi-user — independent sessions ──")
 
@@ -84,6 +85,7 @@ async def demo_multi_user() -> None:
 #
 # Use SqliteSessionStore so history survives process restarts.
 # Pass the same session ID to resume an existing conversation.
+
 
 async def demo_persistent_sessions(db_path: Path) -> None:
     print("\n── 2. Persistent sessions with SQLite ──")
@@ -135,6 +137,7 @@ async def demo_persistent_sessions(db_path: Path) -> None:
 # Run several user sessions in parallel with asyncio.gather.
 # Each session.run() is an independent async generator — fully concurrent.
 
+
 async def handle_user(agent: Agent, user: str, question: str) -> tuple[str, str]:
     session = await agent.session(meta={"user": user})
     result = None
@@ -175,6 +178,7 @@ async def demo_concurrent() -> None:
 #
 # The Agent has a default deps. Each session can swap it with RunOptions(deps=...).
 # Use this for multi-tenant apps where each user has a different DB handle.
+
 
 class TenantDbTool:
     name = "get_balance"
@@ -230,7 +234,7 @@ async def demo_per_session_deps() -> None:
         result = None
         async for event in session.run(
             "What is my account balance?",
-            RunOptions(deps=tenant_db),   # ← per-run tenant DB
+            RunOptions(deps=tenant_db),  # ← per-run tenant DB
         ):
             if event.type == "result":
                 result = event
@@ -241,6 +245,7 @@ async def demo_per_session_deps() -> None:
 #
 # Store arbitrary metadata on sessions. Useful for user IDs, timestamps,
 # conversation labels — anything you want to query later.
+
 
 async def demo_session_metadata() -> None:
     print("\n── 5. Session metadata ──")
@@ -336,9 +341,7 @@ async def demo_web_handler() -> None:
     resp1 = await handle_chat_request(None, "What is the speed of light?", "user42")
     print(f"  Request 1: session={resp1['session_id'][:8]}… | {resp1['response'][:80]}")
 
-    resp2 = await handle_chat_request(
-        resp1["session_id"], "And in km/s?", "user42"
-    )
+    resp2 = await handle_chat_request(resp1["session_id"], "And in km/s?", "user42")
     print(f"  Request 2: session={resp2['session_id'][:8]}… | {resp2['response'][:80]}")
 
     if _AGENT:

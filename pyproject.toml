@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-kit"
-version = "0.1.0"
-description = "AgentKit Python SDK with providers, tools, sessions, permissions, and streaming events."
+version = "0.2.0"
+description = "Production grade agentic harnessing SDK."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -21,6 +21,10 @@ mcp = [
 ]
 anthropic = [
   "anthropic>=0.30.0",
+]
+otel = [
+  "opentelemetry-api>=1.20",
+  "opentelemetry-sdk>=1.20",
 ]
 dev = [
   "pytest>=8.0",

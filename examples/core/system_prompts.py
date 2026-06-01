@@ -50,6 +50,7 @@ BASE = dict(
 # The legacy way. Your text is appended under "User-provided instructions:".
 # The SWE identity + protocol + env blocks remain.
 
+
 def agent_append_legacy() -> Agent:
     return Agent(
         **BASE,
@@ -60,6 +61,7 @@ def agent_append_legacy() -> Agent:
 # ── 2. SystemPromptConfig.append ─────────────────────────────────────────────
 #
 # Typed equivalent of pattern 1. Use this in new code — IDE autocomplete works.
+
 
 def agent_append_typed() -> Agent:
     return Agent(
@@ -76,6 +78,7 @@ def agent_append_typed() -> Agent:
 # Your append text IS the agent's personality. The env block (cwd, tools) stays.
 # Use this for any non-SWE domain: customer support, data analysis, coding tutor…
 
+
 def agent_full_replace(domain_prompt: str) -> Agent:
     return Agent(
         **BASE,
@@ -91,6 +94,7 @@ def agent_full_replace(domain_prompt: str) -> Agent:
 # Inject structured content BEFORE the SWE identity (e.g. a DB schema, a
 # document, a list of constraints).  Useful when your context has structure
 # that benefits from being early in the prompt (better caching hit rate too).
+
 
 def agent_with_prepended_context(schema_sql: str) -> Agent:
     schema_block = SystemBlock(
@@ -113,6 +117,7 @@ def agent_with_prepended_context(schema_sql: str) -> Agent:
 # that session's requests. This is how subagents work internally.
 # Use for: multi-tenant apps where each user has a different persona, locale,
 # or access level.
+
 
 async def multi_tenant_example(api_key: str) -> None:
     print("\n── 5. Per-session override ──")
@@ -149,8 +154,10 @@ async def multi_tenant_example(api_key: str) -> None:
 # automatically omits clauses about those missing tools.
 # This example shows the protocol is scoped to what's actually registered.
 
+
 def show_tool_aware_protocol() -> None:
     from agent_kit.tools.registry import tools_from_defaults as _tfd
+
     # Use a base config without 'tools' so we can supply it per agent
     _base = {k: v for k, v in BASE.items() if k != "tools"}
     print("\n── 6. Tool-aware protocol blocks ──")
@@ -177,6 +184,7 @@ def show_tool_aware_protocol() -> None:
 #
 # Build a deterministic character that never leaks the SWE identity.
 # Combine replace_defaults + append + a temperature setting.
+
 
 def agent_persona(name: str, role: str, style: str) -> Agent:
     persona = (

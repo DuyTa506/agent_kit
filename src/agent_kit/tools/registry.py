@@ -13,11 +13,17 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
+    def add(self, tool: Tool) -> None:
+        self.register(tool)
+
     def register(self, tool: Tool) -> None:
         """Register a new tool.  Raises :exc:`ConfigError` if the name is taken."""
         if tool.name in self._tools:
             raise ConfigError(f"tool {tool.name!r} already registered")
         self._tools[tool.name] = tool
+
+    def remove(self, name: str) -> Tool | None:
+        return self.unregister(name)
 
     def unregister(self, name: str) -> Tool | None:
         """Remove the tool with *name* and return it, or ``None`` if not found.
@@ -77,6 +83,29 @@ class ToolRegistry:
             new._tools[name] = tool
         return new
 
+    def select(
+        self,
+        *,
+        names: set[str] | None = None,
+        tags: set[str] | None = None,
+    ) -> ToolRegistry:
+        """Return tools matching any supplied name or tag.
+
+        With no filters this returns a shallow copy.  Tool tags are read from a
+        ``tags`` attribute when present.
+        """
+        if names is None and tags is None:
+            return self.copy()
+        selected = ToolRegistry()
+        for name, tool in self._tools.items():
+            tool_tags = set(getattr(tool, "tags", ()) or ())
+            if names is not None and name in names:
+                selected._tools[name] = tool
+                continue
+            if tags is not None and tool_tags.intersection(tags):
+                selected._tools[name] = tool
+        return selected
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
@@ -88,7 +117,7 @@ class ToolRegistry:
             {
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": tool.input_schema,
+                "input_schema": getattr(tool, "schema", getattr(tool, "input_schema", {})),
             }
             for tool in self.list()
         ]

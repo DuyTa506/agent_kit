@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent_kit.errors import ToolExecutionError
 
-from .base import ToolContext, ToolResult, ToolScope, require_str
+from .base import ResourceAccess, ToolContext, ToolResult, ToolScope, require_str
 
 
 def resolve_under(cwd: str, path_str: str) -> Path:
@@ -43,6 +43,7 @@ class ReadTool:
         "required": ["file_path"],
     }
     scope: ToolScope = "read"
+    parallel: bool = True
     parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -83,6 +84,9 @@ class ReadTool:
     def summarize(self, input: dict[str, object]) -> str:
         return f"Read {input['file_path']}"
 
+    def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        return [ResourceAccess(resource=f"file:{input['file_path']}", mode="read")]
+
 
 # ---------------------------------------------------------------------------
 # Write
@@ -101,6 +105,7 @@ class WriteTool:
         "required": ["file_path", "content"],
     }
     scope: ToolScope = "write"
+    parallel: bool = False
     parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -126,6 +131,9 @@ class WriteTool:
     def summarize(self, input: dict[str, object]) -> str:
         return f"Write {input['file_path']}"
 
+    def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        return [ResourceAccess(resource=f"file:{input['file_path']}", mode="write")]
+
 
 # ---------------------------------------------------------------------------
 # Edit
@@ -146,6 +154,7 @@ class EditTool:
         "required": ["file_path", "old_string", "new_string"],
     }
     scope: ToolScope = "write"
+    parallel: bool = False
     parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -203,6 +212,9 @@ class EditTool:
     def summarize(self, input: dict[str, object]) -> str:
         return f"Edit {input['file_path']}"
 
+    def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        return [ResourceAccess(resource=f"file:{input['file_path']}", mode="write")]
+
 
 # ---------------------------------------------------------------------------
 # Bash
@@ -224,6 +236,7 @@ class BashTool:
         "required": ["command"],
     }
     scope: ToolScope = "exec"
+    parallel: bool = False
     parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -550,6 +563,7 @@ class GrepTool:
         "required": ["pattern"],
     }
     scope: ToolScope = "read"
+    parallel: bool = True
     parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -579,6 +593,10 @@ class GrepTool:
     def summarize(self, input: dict[str, object]) -> str:
         mode = input.get("output_mode", "files_with_matches")
         return f"Grep {input['pattern']} ({mode})"
+
+    def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        path = str(input.get("path", "") or ".")
+        return [ResourceAccess(resource=f"fs:{path}", mode="read")]
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         pattern = str(input["pattern"])
@@ -693,6 +711,7 @@ class GlobTool:
         "required": ["glob_pattern"],
     }
     scope: ToolScope = "read"
+    parallel: bool = True
     parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
@@ -713,6 +732,10 @@ class GlobTool:
 
     def summarize(self, input: dict[str, object]) -> str:
         return f"Glob {input['glob_pattern']}"
+
+    def resources(self, input: dict[str, object]) -> list[ResourceAccess]:
+        path = str(input.get("target_directory", "") or ".")
+        return [ResourceAccess(resource=f"fs:{path}", mode="read")]
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
         pattern = str(input["glob_pattern"])

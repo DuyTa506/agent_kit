@@ -48,6 +48,7 @@ BASE_CFG = dict(
 #
 # All tool calls auto-approved. Good for development and trusted environments.
 
+
 def make_skip_dangerous_agent() -> Agent:
     return Agent(
         **BASE_CFG,
@@ -61,6 +62,7 @@ def make_skip_dangerous_agent() -> Agent:
 # Requires explicit approval for Bash and anything with scope="exec".
 # In practice: if you have no canUseTool callback, exec calls are denied.
 
+
 def make_edits_agent() -> Agent:
     return Agent(
         **BASE_CFG,
@@ -73,6 +75,7 @@ def make_edits_agent() -> Agent:
 # Block Bash entirely, but allow all other tools.
 # Rules are checked in order; first match wins. The mode default applies
 # when no rule matches.
+
 
 def make_no_bash_agent() -> Agent:
     return Agent(
@@ -91,6 +94,7 @@ def make_no_bash_agent() -> Agent:
 #
 # Allow file ops only inside /tmp; deny access to everything else.
 # PathRule matches against the file_path / target_directory argument.
+
 
 def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
     return Agent(
@@ -114,6 +118,7 @@ def make_sandboxed_agent(allowed_dir: str = "/tmp") -> Agent:
 # Let Bash run, but block dangerous patterns.
 # Patterns are matched as substring or glob against the full command string.
 
+
 def make_safe_bash_agent() -> Agent:
     return Agent(
         **BASE_CFG,
@@ -134,6 +139,7 @@ def make_safe_bash_agent() -> Agent:
 #
 # The simplest custom logic: a plain Python function.
 # Return {"behavior": "allow"} or {"behavior": "deny", "message": "..."}
+
 
 def my_sync_approval(request) -> dict:
     # request.tool.name  — tool being called
@@ -165,6 +171,7 @@ def make_readonly_agent() -> Agent:
 # ── 7. canUseTool — async callback ───────────────────────────────────────────
 #
 # Use async when the approval decision requires I/O (DB lookup, HTTP call).
+
 
 async def my_async_approval(request) -> dict:
     # Simulate an async policy check (e.g. calling an internal API)
@@ -198,6 +205,7 @@ def make_async_callback_agent() -> Agent:
 # In a web app, you'd emit a PermissionRequestEvent over WebSocket instead
 # of using input() — but the callback structure is identical.
 
+
 def make_interactive_agent() -> Agent:
     def interactive_approval(request) -> dict:
         scope = request.tool.scope
@@ -228,6 +236,7 @@ def make_interactive_agent() -> Agent:
 #
 # Rules handle the obvious cases (fast, no I/O). The callback handles the rest.
 # This is the recommended production pattern.
+
 
 def make_production_agent(project_root: str = "/tmp/myproject") -> Agent:
     async def production_approval(request) -> dict:
@@ -278,6 +287,7 @@ async def demo_path_rule() -> None:
     """Show that PathRule restricts file access."""
     print("\n── Demo: PathRule allows only /tmp ──")
     import tempfile
+
     with tempfile.NamedTemporaryFile(dir="/tmp", suffix=".txt", delete=False) as f:
         f.write(b"hello from /tmp\n")
         tmp_path = f.name
@@ -289,6 +299,7 @@ async def demo_path_rule() -> None:
             print("Final:", event.final_text)
 
     import os as _os
+
     _os.unlink(tmp_path)
 
 

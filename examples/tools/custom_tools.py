@@ -41,9 +41,7 @@ class WeatherTool:
     description = "Return the current weather for a city."
     input_schema = {
         "type": "object",
-        "properties": {
-            "city": {"type": "string", "description": "City name, e.g. 'Tokyo'"}
-        },
+        "properties": {"city": {"type": "string", "description": "City name, e.g. 'Tokyo'"}},
         "required": ["city"],
     }
     scope = "read"

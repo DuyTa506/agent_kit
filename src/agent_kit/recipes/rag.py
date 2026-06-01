@@ -3,7 +3,7 @@
 Creates an agent that retrieves relevant documents before each provider call
 and returns a structured ``{answer, citations}`` response.
 
-Exercises: :class:`~agent_kit.context_hooks.ContextInjector`, ``deps``,
+Exercises: :class:`~agent_kit.context.ContextBuilder`, ``deps``,
 :class:`~agent_kit.types.OutputSchema`, tool-aware system prompt.
 
 Quick start::
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..agent import Agent
-from ..context_hooks import TurnContext, prune_tagged
+from ..context import ContextBuildResult
 from ..tools.registry import empty_tools
 from ..types import Message, OutputSchema, TextBlock
 from . import build_agent
@@ -80,20 +80,17 @@ def _last_user_text(provider_view: list[Message]) -> str:
     return ""
 
 
-class _RagInjector:
-    """Context injector that retrieves documents and prepends them each turn."""
+class _RagContextBuilder:
+    """Context builder that retrieves documents for one provider call."""
 
-    async def before_turn(self, ctx: TurnContext) -> None:
-        # Remove previous turn's injected context
-        prune_tagged(ctx.provider_view, _RAG_TAG)
-
-        deps: RagDeps | None = ctx.deps if isinstance(ctx.deps, RagDeps) else None
+    async def build(self, turn) -> ContextBuildResult:
+        deps: RagDeps | None = turn.deps if isinstance(turn.deps, RagDeps) else None
         if deps is None or deps.vector_store is None:
-            return
+            return ContextBuildResult()
 
-        query = _last_user_text(ctx.provider_view)
+        query = _last_user_text(turn.messages)
         if not query:
-            return
+            return ContextBuildResult()
 
         # Call the vector store; accept both .search(query) and .search(query, top_k=n)
         try:
@@ -105,15 +102,19 @@ class _RagInjector:
             else:
                 retrieved = await _maybe_await(deps.vector_store.search(query))
         except Exception:
-            return
+            return ContextBuildResult()
 
         if retrieved:
-            ctx.provider_view.append(
-                Message(
-                    role="user",
-                    content=[TextBlock(text=f"{_RAG_TAG}\nRetrieved context:\n{retrieved}")],
-                )
+            return ContextBuildResult(
+                messages=[
+                    Message(
+                        role="user",
+                        content=[TextBlock(text=f"{_RAG_TAG}\nRetrieved context:\n{retrieved}")],
+                    )
+                ],
+                metadata={"recipe": "rag", "top_k": deps.top_k},
             )
+        return ContextBuildResult()
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -158,7 +159,7 @@ def rag_agent(
     if extra_instructions:
         base_instructions = f"{base_instructions}\n\n{extra_instructions}"
 
-    # No file/shell tools — retrieval is done via the injector
+    # No file/shell tools — retrieval is done via the context builder.
     registry = empty_tools()
 
     return build_agent(
@@ -166,7 +167,7 @@ def rag_agent(
         system_instructions=base_instructions,
         tools=registry,
         output_schema=output_schema or _ANSWER_SCHEMA,
-        context_injectors=[_RagInjector()],
+        context_builder=_RagContextBuilder(),
         deps=deps,
         replace_default_system=True,
         **agent_kwargs,

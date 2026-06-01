@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from agent_kit.tools.base import ToolContext, ToolResult
+from agent_kit.tools.base import ToolContext, ToolResult, ToolScope
 from agent_kit.tools.registry import ToolRegistry, default_tools, empty_tools, tools_from_defaults
 
 # ── Minimal fake tool ───────────────────────────────────────────────────────
 
 
 class FakeTool:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, tags: tuple[str, ...] = ()) -> None:
         self.name = name
         self.description = f"Fake {name}"
         self.input_schema: dict = {"type": "object", "properties": {}}
-        self.scope = "read"
+        self.tags = tags
+        self.scope: ToolScope = "read"
+        self.parallel = True
         self.parallel_safe = True
 
     def validate(self, raw: dict) -> dict:
@@ -122,3 +124,43 @@ def test_register_duplicate_raises():
     r.register(FakeTool("X"))
     with pytest.raises(Exception, match="already registered"):
         r.register(FakeTool("X"))
+
+
+def test_add_and_remove_aliases():
+    r = ToolRegistry()
+    tool = FakeTool("RuntimeTool")
+    r.add(tool)
+    assert r.get("RuntimeTool") is tool
+    assert r.remove("RuntimeTool") is tool
+    assert r.get("RuntimeTool") is None
+
+
+def test_select_by_names_and_tags():
+    r = ToolRegistry()
+    search = FakeTool("SearchDocs", tags=("rag", "search"))
+    calc = FakeTool("Calculator", tags=("math",))
+    r.add(search)
+    r.add(calc)
+
+    selected = r.select(names={"Calculator"}, tags={"rag"})
+    assert {tool.name for tool in selected.list()} == {"SearchDocs", "Calculator"}
+
+
+def test_schemas_accept_v2_schema_attribute():
+    class SchemaTool(FakeTool):
+        schema = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        }
+
+    r = ToolRegistry()
+    r.add(SchemaTool("SearchDocs"))
+
+    assert r.schemas() == [
+        {
+            "name": "SearchDocs",
+            "description": "Fake SearchDocs",
+            "input_schema": SchemaTool.schema,
+        }
+    ]

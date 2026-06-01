@@ -2,6 +2,7 @@ from .anthropic import AnthropicProvider, AnthropicProviderOptions
 from .base import (
     BaseProvider,
     EffortLevel,
+    ProviderCapabilities,
     ThinkingAdaptive,
     ThinkingConfig,
     ThinkingDisabled,
@@ -20,6 +21,7 @@ __all__ = [
     "OpenAIChatProviderOptions",
     "OpenAIResponsesProvider",
     "OpenAIResponsesProviderOptions",
+    "ProviderCapabilities",
     "RetryOptions",
     "ThinkingAdaptive",
     "ThinkingConfig",

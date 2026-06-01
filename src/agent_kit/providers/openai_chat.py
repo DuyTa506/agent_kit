@@ -7,7 +7,7 @@ from typing import Any
 
 from agent_kit.errors import ProviderError
 from agent_kit.openai_responses import map_openai_error
-from agent_kit.providers.base import BaseProvider
+from agent_kit.providers.base import BaseProvider, ProviderCapabilities
 from agent_kit.types import (
     ImageBlock,
     ModelId,
@@ -20,8 +20,8 @@ from agent_kit.types import (
 )
 
 _KNOWN_CONTEXT = {
-    "gpt-5": 400_000,
-    "gpt-4.1": 1_000_000,
+    "gpt-5.5": 400_000,
+    "gpt-5.4": 400_000,
     "gpt-4o": 128_000,
     "o1": 200_000,
 }
@@ -51,6 +51,15 @@ class OpenAIChatCompletionsProvider(BaseProvider):
 
     def context_window(self, model: ModelId) -> int:
         return _KNOWN_CONTEXT.get(model, 128_000)
+
+    def capabilities(self, model: ModelId) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            context_window=self.context_window(model),
+            parallel_tool_calls=True,
+            structured_output=True,
+            tool_choice=True,
+            prompt_cache=False,
+        )
 
     async def _get_client(self) -> Any:
         if self._client is not None:

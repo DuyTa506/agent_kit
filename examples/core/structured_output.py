@@ -79,6 +79,7 @@ def make_sentiment_agent() -> Agent:
 # Same Agent, different schema per call. Useful when you want to reuse the
 # model config but extract different shapes on each request.
 
+
 async def demo_per_run_schema(agent: Agent) -> None:
     print("\n── 2. Per-run schema via RunOptions ──")
 
@@ -149,6 +150,7 @@ async def demo_per_run_schema(agent: Agent) -> None:
 # The loop intercepts the call, sets ResultEvent.structured_output = tool_input,
 # and returns without executing the tool. Works with ANY provider (Anthropic too).
 
+
 def make_sql_agent(db_schema: str) -> Agent:
     sql_output_schema = OutputSchema(
         name="emit_sql",
@@ -167,6 +169,7 @@ def make_sql_agent(db_schema: str) -> Agent:
 
     class EmitSqlTool:
         """Terminal tool — never executed, just captures the model's output."""
+
         name = "emit_sql"
         description = (
             "Output the final SQL query. Call this ONCE when you are ready. "
@@ -206,6 +209,7 @@ def make_sql_agent(db_schema: str) -> Agent:
 #
 # When the model ignores the schema and returns prose, structured_output is None
 # and structured_error has the parse failure reason. Handle gracefully.
+
 
 async def demo_error_handling(agent: Agent) -> None:
     print("\n── 4. structured_error handling ──")
@@ -418,9 +422,9 @@ async def main() -> None:
             if event.type == "result":
                 result = event
         out = result.structured_output or {}
-        cat = out.get('category', '?')
-        pri = out.get('priority', '?')
-        summ = out.get('summary', '?')[:50]
+        cat = out.get("category", "?")
+        pri = out.get("priority", "?")
+        summ = out.get("summary", "?")[:50]
         print(f"  [{pri:6}] {cat:16} | {summ}")
 
 

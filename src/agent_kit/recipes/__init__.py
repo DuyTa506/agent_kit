@@ -15,7 +15,7 @@ Recipes:
      - Key primitives
    * - :mod:`agent_kit.recipes.rag`
      - Retrieval-Augmented Generation
-     - :class:`~agent_kit.context_hooks.ContextInjector`, ``deps``,
+     - :class:`~agent_kit.context.ContextBuilder`, ``deps``,
        :class:`~agent_kit.types.OutputSchema`
    * - :mod:`agent_kit.recipes.text_to_sql`
      - Natural-language → SQL
@@ -62,7 +62,7 @@ def build_agent(
     output_schema: Any = None,
     tool_choice: Any = None,
     final_tool_name: str | None = None,
-    context_injectors: list[Any] | None = None,
+    context_builder: Any = None,
     deps: Any = None,
     replace_default_system: bool = False,
     disable_skills: bool = True,
@@ -88,8 +88,8 @@ def build_agent(
         tool_choice: :class:`~agent_kit.types.ToolChoice` override.
         final_tool_name: Name of a "terminal" tool whose invocation stops the
             loop and sets ``ResultEvent.structured_output``.
-        context_injectors: List of :class:`~agent_kit.context_hooks.ContextInjector`
-            instances run before each provider call.
+        context_builder: :class:`~agent_kit.context.ContextBuilder` instance
+            run before each provider call.
         deps: Application-state dependency object available in every tool's
             ``ctx.deps``.
         replace_default_system: When ``True``, the SWE identity + protocol
@@ -116,7 +116,7 @@ def build_agent(
         output_schema=output_schema,
         tool_choice=tool_choice,
         final_tool_name=final_tool_name,
-        context_injectors=context_injectors,
+        context_builder=context_builder,
         deps=deps,
         features=features,
         **agent_kwargs,
