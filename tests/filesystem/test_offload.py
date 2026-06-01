@@ -131,10 +131,13 @@ async def test_offload_end_to_end() -> None:
     assert len(end.result) < len(BIG)
     # ...but the full structured result still rides along for observers.
     assert end.tool_result is not None
-    assert end.tool_result.metadata.get("offloaded_to")
+    assert end.tool_result.content == BIG
+    assert not end.tool_result.truncated
 
     # Full content lives in the session filesystem.
-    path = end.tool_result.metadata["offloaded_to"]
+    paths = await session.filesystem.ls("/offload")
+    assert len(paths) == 1
+    path = paths[0]
     assert await session.filesystem.read(path) == BIG
 
     # And the persisted provider_view never contains the full payload.

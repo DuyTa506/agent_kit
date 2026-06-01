@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .abort import AbortContext, throw_if_aborted
@@ -45,12 +45,17 @@ def _tool_result_error(content: str, duration_ms: int = 0) -> ToolResult:
     return ToolResult(content=content, is_error=True, duration_ms=duration_ms)
 
 
-def _execution_outcome(call_id: str, tool_result: ToolResult) -> ToolExecutionOutcome:
+def _execution_outcome(
+    call_id: str,
+    tool_result: ToolResult,
+    block_result: ToolResult | None = None,
+) -> ToolExecutionOutcome:
+    provider_result = block_result or tool_result
     return ToolExecutionOutcome(
         block=ToolResultBlock(
             tool_use_id=call_id,
-            content=tool_result.content,
-            is_error=tool_result.is_error,
+            content=provider_result.content,
+            is_error=provider_result.is_error,
         ),
         tool_result=tool_result,
         duration_ms=tool_result.duration_ms,
@@ -187,13 +192,20 @@ async def _execute_one(
             if result.duration_ms <= 0:
                 result.duration_ms = elapsed
             # ── Auto-offload oversized results ────────────────────────────────
+            block_result = result
             _fs = getattr(session, "filesystem", None)
             _offload_cfg = getattr(agent, "result_offload", None)
             if _fs is not None and _offload_cfg is not None:
                 from .filesystem.offload import maybe_offload
 
-                result = await maybe_offload(
+                offload_result = replace(
                     result,
+                    metadata=dict(result.metadata),
+                    citations=list(result.citations),
+                    attachments=list(result.attachments),
+                )
+                block_result = await maybe_offload(
+                    offload_result,
                     tool_name=_tool_name(call),
                     call_id=call.id,
                     backend=_fs,
@@ -201,7 +213,7 @@ async def _execute_one(
                     token_estimator=getattr(agent, "token_estimator", None),
                     model=agent.model,
                 )
-            return _execution_outcome(call.id, result)
+            return _execution_outcome(call.id, result, block_result=block_result)
         except AbortError:
             raise
         except asyncio.TimeoutError:
