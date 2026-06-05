@@ -230,6 +230,8 @@ Implement six async methods: `read`, `write`, `ls`, `edit`, `exists`, `delete`.
 - [ ] If system-block text changed, `test_system_blocks.py` parity assertion updated
 - [ ] If a new `FileBackend` was added, `tests/filesystem/test_backends.py` exercises it via `_exercise(backend)`
 - [ ] CHANGELOG entry if behavior changed for existing users
+- [ ] Background worker tasks are cancelled in both `except AbortError` and `except Exception` handlers if the change touches loop.py or worker spawning
+- [ ] New subagent tools (SubagentContinueTool, TaskStopTool) are tested with a fake provider and InMemorySessionStore
 
 ---
 
@@ -255,12 +257,18 @@ src/linch/          core library
   sessions/             SessionStore + InMemory + SQLite
   mcp/                  MCP server adapters
   skills/               SKILL.md loader + skill context reminders
-  subagents/            agents.yaml loader + child agent runner
+  subagents/            agents.yaml loader + child agent runner + WorkerHandle (workers.py)
+  run_store.py          SqliteRunStore + RunCheckpoint; durable run checkpoint/resume
+  deep_agent/           create_deep_agent factory; DEEP_AGENT_SYSTEM_PROMPT, COORDINATOR_SYSTEM_PROMPT; subagent roster
+  tools/                tool protocol, ToolContext, ToolRegistry, built-ins
+                        + SubagentContinueTool, TaskStopTool, _worker_utils
 
 tests/
   filesystem/           backends, tools, offload unit + end-to-end tests
   loop/                 agent loop tests
   tools/                tool registry, scheduler, reliability tests
+  storage/              SqliteRunStore tests (test_run_store.py)
+  test_deep_agent.py    deep agent preset tests
   ...                   (one directory per subsystem)
 examples/               runnable scripts (require OPENAI_API_KEY unless marked offline)
 docs/                   this documentation

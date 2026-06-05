@@ -57,7 +57,7 @@ linch is designed for application developers building agentic features such as:
 | Filesystem | Virtual filesystem, automatic large-result offloading, disk/state/sqlite backends |
 | Safety | Permission engine, tool/path/bash rules, dangerous-action skipping |
 | Providers | OpenAI Responses, OpenAI Chat Completions, Anthropic, DeepSeek, llama.cpp, pluggable providers |
-| Extensibility | MCP, skills, subagents, observers |
+| Extensibility | MCP, skills, subagents (fork/continue, background workers, coordinator mode), observers |
 | Outputs | Structured output schemas, citations, metadata-rich tool results |
 
 ---
@@ -161,7 +161,9 @@ A `Session` represents one conversation or workflow run. One agent can serve man
 
 ### Deep agent preset
 
-`create_deep_agent()` returns a normal `Agent` with long-horizon defaults: durable run/session storage, task planning tools, virtual filesystem guidance, specialized subagents, and optional memory wiring.
+`create_deep_agent()` returns an `Agent` with long-horizon orchestration defaults: durable run/session SQLite storage, task planning tools, specialist subagents (researcher, planner, implementer), a persistent `/memories` virtual filesystem partition, and deepened system prompt with planning/verification doctrine.
+
+`coordinator=True` turns the parent into a pure orchestrator — it loses heavy tools (Edit/Write/Bash) and gains `SubagentContinueTool` and `TaskStopTool`. Workers receive full tool access. Background workers (`run_in_background=True` on Subagent) deliver results via `<task-notification>` at the top of the next turn. Fork/continue lets you re-engage any retained worker with its full prior context via `SubagentContinue`.
 
 ### Events
 
@@ -234,7 +236,7 @@ Examples are organized by subsystem under `examples/`.
 | `core/structured_output.py` | OutputSchema, final_tool_name, JSON extraction |
 | `core/event_streaming.py` | Consuming events for SSE, WebSocket, CLI progress |
 | `core/multi_session.py` | One Agent, many users, shared deps |
-| `core/deep_agent_resume.py` | `create_deep_agent()` preset with durable run resume |
+| `core/deep_agent_resume.py` | `create_deep_agent()` — 4 demos: planning + /memories + run resume; background worker + notification; fork/continue retained worker; coordinator orchestration |
 | `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
 | `core/interactive_cli.py` | Interactive REPL |
 
@@ -288,15 +290,16 @@ Examples are organized by subsystem under `examples/`.
 
 ## Public API
 
-- `linch`: `Agent`, `Session`, `create_deep_agent`, events, types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
+- `linch`: `Agent`, `Session`, `create_deep_agent`, events (including `BackgroundWorkerEvent`), types, errors, `DetailedCompaction`, `RetryOptions`, `ToolTimeoutError`, `empty_tools`, `tools_from_defaults`
 - `linch.config`: `FeatureFlags`, `SystemPromptConfig`, `SystemPromptSection`
 - `linch.context`: `ContextBuilder`, `ContextBuildResult`, `ContextBudget`
-- `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
+- `linch.deep_agent`: `create_deep_agent`, `DEEP_AGENT_SYSTEM_PROMPT`, `COORDINATOR_SYSTEM_PROMPT`, `DEEP_AGENT_SUBAGENTS`
 - `linch.skills`: built-in and project `SKILL.md` workflows, including `verify`
 - `linch.memory`: `MemoryStore`, `MemoryItem`, `MemoryContextBuilder`, `MemorySearchTool`, `MemoryUpsertTool`, reference stores
 - `linch.types`: `OutputSchema`, `ToolChoice`, `Message`, `ProviderRequest`
 - `linch.providers`: `OpenAIResponsesProvider`, `OpenAIChatCompletionsProvider`, `AnthropicProvider`, `LlamaCppProvider`
-- `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools
+- `linch.tools`: duck-typed tool protocol, `ResourceAccess`, `Citation`, `ToolResult`, `ToolRegistry`, built-in tools, `SubagentContinueTool`, `TaskStopTool`
+- `linch.subagents`: `WorkerHandle`, `RunSubagentArgs`, `ContinueSubagentArgs`, `RunSubagentResult`
 - `linch.sessions`: `InMemorySessionStore`, `SqliteSessionStore`
 - `linch.filesystem`: `FileBackend`, `StateFileBackend`, `DiskFileBackend`, `SqliteFileBackend`, `CompositeFileBackend`, `OffloadConfig`, `filesystem_tools`
 - `linch.permissions`: `PermissionEngine`, `ToolRule`, `PathRule`, `BashRule`

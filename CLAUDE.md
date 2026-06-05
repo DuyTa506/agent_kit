@@ -41,9 +41,9 @@ Agent (config) → Session (state) → run_loop() → Events → caller
 ```
 
 1. **Agent** (`agent.py`) — holds immutable config: model, provider, tools, permissions, session_store, system prompt, compaction strategy.
-2. **Session** (`session.py`) — per-conversation state: `provider_view` (trimmed for LLM context), `full_history` (complete record). Call `session.run(prompt)` to get an `AsyncIterator[Event]`.
+2. **Session** (`session.py`) — per-conversation state: `provider_view` (trimmed for LLM context), `full_history` (complete record), `workers` (live `WorkerHandle` objects keyed by worker_id), `pending_notifications` (background worker `<task-notification>` Messages drained at top of each turn). Call `session.run(prompt)` to get an `AsyncIterator[Event]`.
 3. **run_loop / stream_turn** (`loop.py`) — the main agent loop. Each turn: build user message → run `ContextBuilder` → call `provider.stream()` → collect text/tool-use blocks → check permissions → execute tools (via `scheduler.py`) → emit events → repeat if more tool calls; stop on text-only response.
-4. **Events** (`events.py`) — all communication from the loop is through events: `UserEvent`, `ContextBuildEvent`, `AssistantEvent`, `ToolCallStartEvent`, `ToolCallEndEvent`, `PermissionRequestEvent`, `UsageEvent`, `ResultEvent`, `ErrorEvent`, `CompactionEvent`, `LoopGuardEvent`, and skill/subagent events.
+4. **Events** (`events.py`) — all communication from the loop is through events: `UserEvent`, `ContextBuildEvent`, `AssistantEvent`, `ToolCallStartEvent`, `ToolCallEndEvent`, `PermissionRequestEvent`, `UsageEvent`, `ResultEvent`, `ErrorEvent`, `CompactionEvent`, `LoopGuardEvent`, skill/subagent events, and `BackgroundWorkerEvent` (`worker_id`, `status`, `display_name`; emitted when a background worker completes).
 
 ### Providers (`providers/`)
 
@@ -103,6 +103,17 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 
 `SessionStore` is a protocol. Implementations: `InMemorySessionStore` (ephemeral) and `SqliteSessionStore` (persistent). The store also handles task management (`Task`, `TaskPatch`, status tracking) used by the `TaskCreate/List/Get/Update` tools.
 
+`run_store.py` provides `SqliteRunStore` and `RunCheckpoint` for durable run checkpointing, enabling deep-agent runs to resume across process restarts.
+
+### Deep agent preset (`deep_agent/`)
+
+`create_deep_agent(*, model, durable, coordinator, cwd, ...)` is a factory in `deep_agent/factory.py` that assembles a fully-configured `Agent` with task tools, a built-in subagent roster (researcher, planner, implementer defined in `deep_agent/subagents.py` as `DEEP_AGENT_SUBAGENTS`), durable SQLite stores, a `/memories` filesystem partition, and a deepened system prompt.
+
+- **`coordinator=True`** — strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`) from the parent agent, injects `COORDINATOR_SYSTEM_PROMPT` (from `deep_agent/prompts.py`), and registers `TaskStopTool`. Workers still receive full tool access.
+- **`durable=True`** — sets `SqliteSessionStore`, `SqliteRunStore`, and `CompositeFileBackend` with a persistent `/memories` partition backed by `SqliteFileBackend`, enabling cross-process resume.
+- `DEEP_AGENT_SYSTEM_PROMPT` and `COORDINATOR_SYSTEM_PROMPT` live in `deep_agent/prompts.py`.
+- `DEEP_AGENT_SUBAGENTS` in `deep_agent/subagents.py` defines researcher, planner, and implementer subagent definitions used by default.
+
 ### MCP Integration (`mcp/`)
 
 `connect_mcp_servers()` connects to external MCP servers (stdio or HTTP) and returns an `McpConnection` that exposes MCP tools as Linch tools. MCP tool names are normalized via `mcp/naming.py`.
@@ -112,6 +123,10 @@ Use `ContextBuilder.build(turn) -> ContextBuildResult` for RAG, memory recall, e
 **Skills** are slash-commands defined as `SKILL.md` files (YAML frontmatter + markdown body) loaded from `.linch/skills/*/SKILL.md`. The skill system supports argument substitution and system-reminder injection.
 
 **Subagents** are specialized agent roles defined in `.linch/agents.yaml`. The subagent registry resolves agent definitions; `runner.py` executes them with their own tool overlays and prompts.
+
+**Worker lifecycle and fork/continue**: `SubagentTool` passes `retain=True` in `RunSubagentArgs` so child sessions remain alive in `agent._sessions` after the initial run. `_drive_child` is a shared helper used by both `run_subagent` and `continue_subagent` to drive a child session. `SubagentContinueTool` (schema: `{to, message}`) re-engages a retained worker by worker_id or display_name, resuming with its full prior `provider_view`. `TaskStopTool` (schema: `{task_id, reason}`) cancels a running background worker task; the handle remains continuable. `WorkerHandle` (`subagents/workers.py`) is a dataclass tracking `worker_id`, `child_session_id`, `display_name`, `definition`, `status`, `task`, and `last_result_text` for each live worker. Parent session exposes `session.workers: dict[str, WorkerHandle]`.
+
+**Background workers**: `SubagentTool` with `run_in_background=True` spawns `asyncio.create_task` and returns an ack immediately without blocking the turn. On completion the worker appends a `<task-notification>` XML `Message` to `session.pending_notifications`. The next `session.run()` call drains all pending notifications as `UserEvent`s at the top of the turn via `_drain_pending_notifications` in `loop.py`. `session.abort()` cancels all running background worker tasks; `agent.close()` also cancels them and clears `_sessions`.
 
 ### Compaction (`compaction.py`)
 
@@ -137,3 +152,4 @@ Observers are attached via `Agent(observers=[...])` and accessed as `agent.obser
 - Tool timeouts default to `None` (off) and use `asyncio.wait_for` + `asyncio.TimeoutError` (not the 3.11+ unified builtin) to stay Python 3.10 compatible. Timeouts convert to `is_error=True` results; they never raise out of `_execute_one` so parallel-lane siblings are unaffected.
 - Tool retry is side-effect gated: read-scope tools only, or tools that explicitly set `retryable = True`. Write/exec tools are never retried by default.
 - Virtual filesystem is opt-in (`Agent(filesystem=...)` or `Agent(result_offload=...)`); zero overhead when unset. `DiskFileBackend` defaults to `.linch/offload` (gitignored). `maybe_offload` is a no-op on error results and filesystem-tool results. A backend write failure silently returns the original result — storage errors never crash a run.
+- Background workers use `asyncio.create_task` detached from the current turn; `session.abort()` cancels them and `agent.close()` also cancels and clears `_sessions`. `_cancel_background_workers` is called in both `except AbortError` and `except Exception` branches so orphaned tasks never write into a dead session.

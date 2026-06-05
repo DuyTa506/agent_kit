@@ -554,6 +554,103 @@ offloading so reading a large file back does not recursively re-offload it.
 
 ---
 
+## Deep agent preset
+
+`create_deep_agent()` is a convenience factory that wires up a multi-agent
+configuration with a single call.
+
+### `create_deep_agent()`
+
+```python
+from linch import create_deep_agent
+from linch.providers import OpenAIChatCompletionsProvider
+
+agent = create_deep_agent(
+    model="deepseek-v4-pro",
+    provider=OpenAIChatCompletionsProvider(...),  # any provider
+    cwd=".",                           # workspace root
+    durable=True,                      # SQLite session + run + /memories stores
+    permissions={"mode": "skip-dangerous"},
+)
+session = await agent.session()
+```
+
+`durable=True` sets up three persistent stores: `SqliteSessionStore`,
+`SqliteRunStore`, and a `CompositeFileBackend` with a persistent `/memories`
+partition (SQLite-backed). Everything else in the virtual filesystem is
+ephemeral (`StateFileBackend`). With `durable=False` all stores are in-memory.
+
+### Background workers
+
+Spawn a worker in the background by passing `run_in_background=True` to the
+`Subagent` tool. The turn returns immediately with an ack; a
+`<task-notification>` is injected at the top of the next turn once the worker
+finishes.
+
+```python
+# Turn 1 — spawn in background (returns immediately with ack)
+async for event in session.run(
+    "Use Subagent with subagent_type='researcher' and run_in_background=True. "
+    "Task: summarise Python asyncio.gather in 2 sentences."
+):
+    if event.type == "result":
+        print(event.final_text)  # "Worker agent-xxxx started in background."
+
+# Wait for worker (optional — turn 2 will receive the notification even without this)
+for handle in session.workers.values():
+    if handle.task and not handle.task.done():
+        await handle.task
+
+# Turn 2 — <task-notification> is drained automatically at the top of this turn
+async for event in session.run("Summarise what the background researcher found."):
+    if event.type == "result":
+        print(event.final_text)
+```
+
+### Fork/continue
+
+Every `Subagent` result includes a `[Worker ID: agent-xxxx]` suffix so the
+coordinator can re-engage the same worker with its full context intact using
+`SubagentContinue`.
+
+```python
+# Turn 1 — spawn foreground worker
+async for event in session.run(
+    "Use Subagent(subagent_type='researcher') to explain asyncio.gather in 1 sentence."
+):
+    if event.type == "result":
+        print(event.final_text)   # includes "[Worker ID: agent-a1b2]"
+
+# Turn 2 — continue the same worker with its full context
+async for event in session.run(
+    "Use SubagentContinue(to='agent-a1b2', message='Give a one-line code example.')"
+):
+    if event.type == "result":
+        print(event.final_text)
+```
+
+`session.workers` is a `dict[str, WorkerHandle]`. Each handle exposes
+`handle.child_session_id`, `handle.status`, and `handle.last_result_text`.
+
+### Coordinator mode
+
+```python
+agent = create_deep_agent(
+    model="...",
+    coordinator=True,          # parent orchestrates only
+    durable=False,
+    permissions={"mode": "skip-dangerous"},
+)
+# Parent has no Edit/Write/Bash/Grep/Glob/Read — only Subagent/SubagentContinue/TaskStop + task tools
+# Workers receive full tool access via SubagentTool → build_child_tools
+```
+
+To stop a running background worker: `TaskStop(task_id='agent-xxxx')`. The
+handle stays in `session.workers` so it can be continued later with
+`SubagentContinue`.
+
+---
+
 ## See `examples/` for runnable code
 
 Examples are organized by subsystem. Local demos (marked *local*) run without
@@ -574,6 +671,7 @@ a live API key.
 | `core/multi_session.py` | Web-app pattern: one Agent, many users, shared deps |
 | `core/loop_guard_agent.py` | LoopGuard — identical-call and failure-streak detection |
 | `core/interactive_cli.py` | Interactive REPL |
+| `core/deep_agent_resume.py` | `create_deep_agent` — 4 demos: planning + /memories, background worker + notification, fork/continue, coordinator mode |
 
 **`tools/`** — *local demos available*
 

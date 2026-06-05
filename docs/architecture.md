@@ -526,8 +526,11 @@ graph LR
         SIE["SkillInvokedEvent"]
         SCE["SkillCompletedEvent"]
         SAE["SubagentEvent\nwraps a nested Event"]
+        BWE["BackgroundWorkerEvent\nworker_id · status · display_name"]
     end
 ```
+
+`BackgroundWorkerEvent` is emitted when a background worker task completes (success or failure); it carries `worker_id`, `status`, and `display_name`.
 
 `event_to_dict` and `event_from_dict` in `events.py` provide full round-trip serialization for all event types.
 
@@ -637,7 +640,12 @@ classDiagram
 | `sessions/` | `SessionStore` protocol, `InMemorySessionStore`, `SqliteSessionStore` |
 | `mcp/` | MCP server connection → Linch tool adapters |
 | `skills/` | `SKILL.md`-based slash-commands with argument substitution |
-| `subagents/` | Specialized agent roles from `.linch/agents.yaml` |
+| `subagents/` | Specialized agent roles from `.linch/agents.yaml`; `workers.py` — `WorkerHandle` dataclass for per-worker state tracking; wiring for `SubagentContinueTool` |
+| `run_store.py` | `SqliteRunStore`, `RunCheckpoint` — durable run-level checkpoint/resume storage; `RunCheckpoint` stores `background_workers` list |
+| `deep_agent/` | `create_deep_agent` factory (`factory.py`); deep prompt layers (`prompts.py`); specialist subagent roster — researcher, planner, implementer (`subagents.py`) |
+| `tools/subagent_continue.py` | `SubagentContinueTool` — continues a retained child session by worker id or display name |
+| `tools/subagent_stop.py` | `TaskStopTool` — cancels a background worker; handle remains in `session.workers` and is still continuable |
+| `tools/_worker_utils.py` | `resolve_worker` — shared id/display-name lookup helper used by continue and stop tools |
 | `recipes/` | *(removed)* — use `Agent(...)` directly; see `examples/` for domain patterns |
 
 ---
@@ -803,6 +811,23 @@ not copied from the parent. Gated by `FeatureFlags(subagents=True)`.
 
 **MCP** — `connect_mcp_servers(configs)` wraps each MCP tool as a duck-typed Linch tool. Names are normalized via `mcp/naming.py`. The connection closes on `agent.close()`. Gated by `FeatureFlags(mcp=True)`.
 
+### Deep agent preset (`deep_agent/`)
+
+`create_deep_agent(model, durable, coordinator, cwd, ...)` is a factory that assembles a full deep-agent configuration in one call: task tools, a specialist subagent roster (researcher, planner, implementer), durable stores, a persistent `/memories` filesystem, and a deepened system prompt.
+
+- **`coordinator=True`** — the parent agent strips heavy tools (`Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Read`); `COORDINATOR_SYSTEM_PROMPT` is injected via `SystemPromptConfig`; `TaskStopTool` is registered on the coordinator. Worker subagents receive full tool access via `build_child_tools`.
+- **`durable=True`** — wires `SqliteSessionStore` + `SqliteRunStore` + `CompositeFileBackend` with a `/memories` route to `SqliteFileBackend` so memory persists across restarts.
+
+### Background workers and fork/continue
+
+- `SubagentTool` always passes `retain=True` so the child session stays live in `agent._sessions` after the run ends.
+- `session.workers: dict[str, WorkerHandle]` indexes every spawned worker by `worker_id`.
+- **`run_in_background=True`** on `SubagentTool`: spawns `asyncio.create_task(_bg_run())` and returns an acknowledgement immediately. On completion, the task appends a `<task-notification>` XML `Message` to `session.pending_notifications`.
+- The loop drains `session.pending_notifications` at the top of each turn (`_drain_pending_notifications`), yielding each notification as a `UserEvent` before `ContextBuilder.build()` runs, so the model sees task-completion content before the next provider call.
+- `SubagentContinueTool` resolves a worker by id or display name via `resolve_worker`, then calls `continue_subagent()`, which re-drives the live child session using the full prior `provider_view`.
+- `TaskStopTool` cancels the background `asyncio.Task` and signals abort on the child session; the `WorkerHandle` remains in `session.workers` so the worker can be continued later.
+- `session.abort()` and `agent.close()` both cancel all running background worker tasks. `agent.close()` additionally clears `agent._sessions`.
+
 ---
 
 ## 13. Key Invariants
@@ -823,3 +848,6 @@ These must not break across refactors:
 | 10 | **Provider capabilities apply per-request** — `_build_turn_request()` always calls `apply_provider_capabilities()` when the provider has `capabilities()`; no provider receives features it declared unsupported. |
 | 11 | **Offload only replaces `ToolResult.content` before block construction** — the full result is preserved on `ToolCallEndEvent.tool_result`; `full_history` and `provider_view` receive the preview only. `maybe_offload` never raises — a backend write failure silently returns the original result so a storage hiccup never breaks a run. |
 | 12 | **Filesystem tools are excluded from offloading** — `read_file`, `write_file`, `edit_file`, `ls` are in `OffloadConfig.skip_tools` by default; reading a large file back cannot trigger a recursive re-offload. |
+| 13 | **Background workers are cancelled at both exit paths** — `_cancel_background_workers(session)` is called in both the `except AbortError` and `except Exception` handlers in `run_loop`. Worker tasks must never write into a session whose run has already ended. |
+| 14 | **`SubagentTool` always uses `retain=True`** — child sessions remain in `agent._sessions` until `agent.close()` clears them. `continue_subagent` relies on the child session being live; removing it would silently break fork/continue. |
+| 15 | **`session.pending_notifications` is drained before `ContextBuilder.build()`** — `_drain_pending_notifications` converts each queued `<task-notification>` Message into a `UserEvent` at the top of every new turn, so the model sees background task results before the next provider call. |
