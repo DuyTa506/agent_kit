@@ -1,5 +1,6 @@
 """Public API for linch."""
 
+from ._version import get_version
 from .agent import Agent, AgentOptions
 from .compaction import DefaultCompaction, DetailedCompaction
 from .config import FeatureFlags, SystemPromptConfig, SystemPromptSection
@@ -154,6 +155,7 @@ from .types import (
 )
 
 defaultTools = default_tools
+__version__ = get_version()
 
 __all__ = [
     "AbortError",
@@ -273,6 +275,7 @@ __all__ = [
     "create_deep_agent",
     "defaultTools",
     "default_tools",
+    "__version__",
     "is_context_build_event",
     "is_loop_guard_event",
     "is_subagent_event",

@@ -6,11 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from ._version import get_version
 from .config import FeatureFlags, SystemPromptConfig
 from .errors import ConfigError
 from .middleware import normalize_middleware
 from .openai_responses import OpenAIOptions, OpenAIReasoning
-from .permissions import BashRule, PathRule, PermissionEngine, ToolRule
+from .permissions import BashRule, CanUseTool, PathRule, PermissionEngine, PermissionRule, ToolRule
 from .providers import BaseProvider, OpenAIResponsesProvider, OpenAIResponsesProviderOptions
 from .sessions import SessionStore, SqliteSessionStore
 from .tools import ToolRegistry, default_tools
@@ -34,6 +35,148 @@ _UNSET: Any = object()
 _DEFAULT_OFFLOAD: Any = object()
 
 _SECTION_PLACEMENTS = ("before_defaults", "after_defaults", "after_env")
+
+
+@dataclass(slots=True)
+class _PermissionConfig:
+    mode: PermissionMode
+    rules: list[PermissionRule]
+    can_use_tool: CanUseTool | None
+
+
+@dataclass(slots=True)
+class _RuntimeLimits:
+    max_tool_concurrency: int
+    tool_timeout_ms: float | None
+
+
+def _resolve_system_prompt(
+    system_prompt: str | None,
+    system_prompt_alias: str | None,
+    cfg: SystemPromptConfig | None,
+) -> str | None:
+    if system_prompt_alias is not None:
+        system_prompt = system_prompt_alias
+    if cfg is not None and cfg.append is not None:
+        return cfg.append
+    return system_prompt
+
+
+def _normalize_openai_options(
+    openai: OpenAIOptions | None,
+    *,
+    api_key: str | None,
+    base_url: str | None,
+) -> OpenAIOptions:
+    return openai or OpenAIOptions(api_key=api_key, base_url=base_url)
+
+
+def _resolve_provider(
+    provider: BaseProvider | None,
+    openai: OpenAIOptions,
+    reasoning: OpenAIReasoning | None,
+) -> BaseProvider:
+    if provider is not None:
+        return provider
+    return OpenAIResponsesProvider(
+        OpenAIResponsesProviderOptions(
+            api_key=openai.api_key,
+            base_url=openai.base_url,
+            default_headers=openai.default_headers,
+            reasoning=reasoning,
+        )
+    )
+
+
+def _normalize_permissions(permissions: Any | dict[str, object] | None) -> _PermissionConfig:
+    if permissions is None:
+        return _PermissionConfig(mode="default", rules=[], can_use_tool=None)
+
+    if isinstance(permissions, dict):
+        perm_mode = _normalize_permission_mode(permissions.get("mode", "default"))
+        rules_raw = permissions.get("rules", [])
+        if not isinstance(rules_raw, list):
+            raise ConfigError("permissions.rules must be a list")
+        perm_rules: list[PermissionRule] = []
+        for rule in rules_raw:
+            if not isinstance(rule, (ToolRule, PathRule, BashRule)):
+                raise ConfigError(
+                    "permissions.rules entries must be ToolRule, PathRule, or BashRule"
+                )
+            perm_rules.append(rule)
+        can_use = permissions.get("canUseTool") or permissions.get("can_use_tool")
+        return _PermissionConfig(
+            mode=perm_mode,
+            rules=perm_rules,
+            can_use_tool=cast(CanUseTool | None, can_use),
+        )
+
+    perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
+    raw_rules = getattr(permissions, "rules", None)
+    perm_rules = list(raw_rules) if raw_rules else []
+    can_use = getattr(permissions, "canUseTool", None) or getattr(
+        permissions, "can_use_tool", None
+    )
+    return _PermissionConfig(
+        mode=perm_mode,
+        rules=cast(list[PermissionRule], perm_rules),
+        can_use_tool=cast(CanUseTool | None, can_use),
+    )
+
+
+def _resolve_runtime_limits(
+    max_tool_concurrency: int | None,
+    tool_timeout_ms: float | None,
+) -> _RuntimeLimits:
+    env_concurrency = os.getenv("AGENTKIT_MAX_TOOL_CONCURRENCY")
+    if max_tool_concurrency is None:
+        if env_concurrency is not None:
+            try:
+                max_tool_concurrency = int(float(env_concurrency))
+            except (ValueError, TypeError):
+                pass
+        if max_tool_concurrency is None:
+            max_tool_concurrency = os.cpu_count() or 4
+
+    env_timeout = os.getenv("AGENTKIT_TOOL_TIMEOUT_MS")
+    if tool_timeout_ms is None and env_timeout is not None:
+        try:
+            tool_timeout_ms = float(env_timeout)
+        except ValueError:
+            pass
+
+    timeout = tool_timeout_ms if tool_timeout_ms is not None and tool_timeout_ms > 0 else None
+    return _RuntimeLimits(
+        max_tool_concurrency=max(1, int(max_tool_concurrency)),
+        tool_timeout_ms=timeout,
+    )
+
+
+def _resolve_result_offload(result_offload: Any, provider: BaseProvider, model: str) -> Any:
+    if result_offload is _DEFAULT_OFFLOAD:
+        from .filesystem.offload import OffloadConfig as _OffloadConfig
+
+        result_offload = _OffloadConfig()
+
+    if result_offload is not None and getattr(result_offload, "threshold_tokens", None) is None:
+        try:
+            import dataclasses as _dc
+
+            fraction = getattr(result_offload, "threshold_fraction", 0.1)
+            ctx_window = provider.context_window(model)
+            resolved = max(1_000, int(ctx_window * fraction))
+            result_offload = _dc.replace(result_offload, threshold_tokens=resolved)
+        except Exception as _exc:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Could not resolve threshold_tokens from provider.context_window(%r): %s. "
+                "Result offloading will be skipped. Pass an explicit "
+                "OffloadConfig(threshold_tokens=N) to suppress this warning.",
+                model,
+                _exc,
+            )
+    return result_offload
 
 
 def _system_prompt_section_blocks(cfg: SystemPromptConfig | None) -> dict[str, list[SystemBlock]]:
@@ -163,16 +306,7 @@ class Agent:
         enable_background_subagents: bool = False,
         enable_task_stop: bool = False,
     ) -> None:
-        if systemPrompt is not None:
-            system_prompt = systemPrompt
-        # SystemPromptConfig takes precedence over the bare system_prompt string;
-        # if both are provided the config wins (its .append field overrides).
-        if system_prompt_config is not None and system_prompt_config.append is not None:
-            system_prompt = system_prompt_config.append
-        elif system_prompt_config is not None:
-            # replace_defaults or custom blocks but no append text — keep
-            # system_prompt as-is (may be None).
-            pass
+        system_prompt = _resolve_system_prompt(system_prompt, systemPrompt, system_prompt_config)
         if maxRetries is not None:
             max_retries = maxRetries
         if maxOutputTokens is not None:
@@ -197,40 +331,23 @@ class Agent:
         if max_retries < 0:
             raise ConfigError("max_retries must be non-negative")
 
-        if openai is None:
-            openai = OpenAIOptions(api_key=openai_api_key, base_url=openai_base_url)
-        if permissions is None:
-            perm_mode: PermissionMode = "default"
-            perm_rules = []
-            perm_can_use = None
-        elif isinstance(permissions, dict):
-            perm_mode = _normalize_permission_mode(permissions.get("mode", "default"))
-            rules_raw = permissions.get("rules", [])
-            if not isinstance(rules_raw, list):
-                raise ConfigError("permissions.rules must be a list")
-            perm_rules = []
-            for rule in rules_raw:
-                if not isinstance(rule, (ToolRule, PathRule, BashRule)):
-                    raise ConfigError(
-                        "permissions.rules entries must be ToolRule, PathRule, or BashRule"
-                    )
-                perm_rules.append(rule)
-            perm_can_use = permissions.get("canUseTool") or permissions.get("can_use_tool")
-        else:
-            perm_mode = _normalize_permission_mode(getattr(permissions, "mode", "default"))
-            perm_rules = list(permissions.rules) if permissions.rules else []
-            perm_can_use = getattr(permissions, "canUseTool", None) or getattr(
-                permissions, "can_use_tool", None
-            )
+        openai = _normalize_openai_options(
+            openai,
+            api_key=openai_api_key,
+            base_url=openai_base_url,
+        )
+        permissions_config = _normalize_permissions(permissions)
+        provider = _resolve_provider(provider, openai, reasoning)
+        runtime_limits = _resolve_runtime_limits(max_tool_concurrency, tool_timeout_ms)
 
         cwd_resolved = str(Path(cwd or os.getcwd()).resolve())
         self.model = model
         self.cwd = cwd_resolved
         self.tools = tools or default_tools()
         self.permission_engine = PermissionEngine(
-            mode=perm_mode,
-            rules=perm_rules,
-            can_use_tool=perm_can_use,
+            mode=permissions_config.mode,
+            rules=permissions_config.rules,
+            can_use_tool=permissions_config.can_use_tool,
             project_root=cwd_resolved,
         )
         self._store: SessionStore | None = session_store
@@ -240,57 +357,24 @@ class Agent:
         self.max_output_tokens = max_output_tokens
         self.include_partial_messages = include_partial_messages
         self.max_turns = max_turns or float("inf")
-        if provider is None:
-            if openai is None:
-                openai = OpenAIOptions(api_key=openai_api_key, base_url=openai_base_url)
-            provider = OpenAIResponsesProvider(
-                OpenAIResponsesProviderOptions(
-                    api_key=openai.api_key,
-                    base_url=openai.base_url,
-                    default_headers=openai.default_headers,
-                    reasoning=reasoning,
-                )
-            )
         self._provider = provider
         self.cache_ttl = cache_ttl
         self._config_dir = str(Path(cwd_resolved) / (config_dir or ".linch"))
         self._mcp_servers = mcp_servers
-        env_concurrency = os.getenv("AGENTKIT_MAX_TOOL_CONCURRENCY")
-        if max_tool_concurrency is None:
-            if env_concurrency is not None:
-                try:
-                    max_tool_concurrency = int(float(env_concurrency))
-                except (ValueError, TypeError):
-                    pass
-            if max_tool_concurrency is None:
-                max_tool_concurrency = os.cpu_count() or 4
-        self.max_tool_concurrency = max(1, int(max_tool_concurrency))
+        self.max_tool_concurrency = runtime_limits.max_tool_concurrency
         self.tool_concurrency = self.max_tool_concurrency
-
-        # Per-tool timeout (AGENTKIT_TOOL_TIMEOUT_MS env; None = no timeout by default).
-        env_timeout = os.getenv("AGENTKIT_TOOL_TIMEOUT_MS")
-        if tool_timeout_ms is None and env_timeout is not None:
-            try:
-                tool_timeout_ms = float(env_timeout)
-            except ValueError:
-                pass
-        self.tool_timeout_ms: float | None = (
-            tool_timeout_ms if (tool_timeout_ms is not None and tool_timeout_ms > 0) else None
-        )
+        self.tool_timeout_ms: float | None = runtime_limits.tool_timeout_ms
 
         # Optional tool retry config (RetryOptions | None; None = no retry by default).
         self.tool_retry: Any = tool_retry
 
-        self.skills: dict[str, Any] = {}
-        self.skill_listing_text: str | None = None
-        self._sessions: dict[str, Session] = {}
-        self.subagent_registry: Any = None
-        self.subagent_run_counters: dict[str, int] = {}
-        self.extra_subagents: list[AgentDefinition] = list(extra_subagents or [])
-        self.enable_worker_tools = bool(enable_worker_tools)
-        self.retain_subagents = bool(retain_subagents)
-        self.enable_background_subagents = bool(enable_background_subagents)
-        self.enable_task_stop = bool(enable_task_stop)
+        self._initialize_extension_state(
+            extra_subagents=extra_subagents,
+            enable_worker_tools=enable_worker_tools,
+            retain_subagents=retain_subagents,
+            enable_background_subagents=enable_background_subagents,
+            enable_task_stop=enable_task_stop,
+        )
         self.compaction: Any = compaction
         self.token_estimator = token_estimator
 
@@ -308,86 +392,71 @@ class Agent:
         self.tool_choice: ToolChoice | None = tool_choice
         self.final_tool_name: str | None = final_tool_name
 
-        # Loop guard: detect repeated identical tool calls and consecutive
-        # failures to prevent runaway loops.  On by default; disable with
-        # Agent(loop_guard=None).
-        from .loop_guard import LoopGuard as _LoopGuard
-        from .loop_guard import normalize_loop_guard as _normalize_loop_guard
-
-        effective_lg = loopGuard if loopGuard is not _UNSET else loop_guard
-        if effective_lg is _UNSET:
-            # Neither parameter was supplied — enable with default thresholds.
-            self.loop_guard: _LoopGuard | None = _LoopGuard()
-        else:
-            self.loop_guard = _normalize_loop_guard(effective_lg)
-
-        # Observability observers — zero-overhead when empty.
-        from .observability import normalize_observers as _normalize_observers
-
-        self._observers: list[Any] = _normalize_observers(observers)
-
-        # Tool middleware: governance and result transformation hooks.
-        self.middleware: list[Any] = normalize_middleware(middleware)
-
         # Store SystemPromptConfig for use in _build_system_blocks
         self._system_prompt_config: SystemPromptConfig | None = system_prompt_config
+        self._cached_system_blocks: list[SystemBlock] | None = None
+        self._configure_loop_guard(loop_guard, loopGuard)
+        self._configure_hooks(observers, middleware)
+        self._configure_filesystem(filesystem, result_offload)
 
-        # ── Virtual filesystem subsystem ────────────────────────────────────
-        # ``filesystem`` is the per-agent default backend; a fresh clone (or
-        # the same persistent backend) is attached to each session in session().
-        # ``result_offload`` (OffloadConfig) enables automatic offloading of
-        # oversized tool results via the scheduler.  On by default; disable
-        # with ``Agent(result_offload=None)`` or ``FeatureFlags(filesystem=False)``.
-        if result_offload is _DEFAULT_OFFLOAD:
-            from .filesystem.offload import OffloadConfig as _OffloadConfig
-
-            result_offload = _OffloadConfig()
-
-        # Resolve threshold_tokens from the model's context window when the
-        # caller left it as None (the default).  Done once here so maybe_offload
-        # always receives a concrete integer.
-        if result_offload is not None and getattr(result_offload, "threshold_tokens", None) is None:
-            try:
-                import dataclasses as _dc
-
-                fraction = getattr(result_offload, "threshold_fraction", 0.1)
-                ctx_window = provider.context_window(self.model)
-                resolved = max(1_000, int(ctx_window * fraction))
-                result_offload = _dc.replace(result_offload, threshold_tokens=resolved)
-            except Exception as _exc:
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "Could not resolve threshold_tokens from provider.context_window(%r): %s. "
-                    "Result offloading will be skipped. Pass an explicit "
-                    "OffloadConfig(threshold_tokens=N) to suppress this warning.",
-                    self.model,
-                    _exc,
-                )
-
-        self._filesystem_default: Any = filesystem
-        self.result_offload: Any = result_offload
-
-        # Register filesystem tools when the subsystem is active — either an
-        # explicit backend, or offload (which needs read_file/ls to recover
-        # offloaded content).  Gated by FeatureFlags.filesystem so it can be
-        # disabled wholesale even when a backend is passed.
-        if self._filesystem_active():
-            from .filesystem.tools import filesystem_tools as _fs_tools
-
-            for t in _fs_tools():
-                try:
-                    self.tools.register(t)
-                except Exception:
-                    pass  # already registered (e.g. caller added them manually)
-            self._refresh_system_blocks()
-
+    def _initialize_extension_state(
+        self,
+        *,
+        extra_subagents: list[AgentDefinition] | None,
+        enable_worker_tools: bool,
+        retain_subagents: bool,
+        enable_background_subagents: bool,
+        enable_task_stop: bool,
+    ) -> None:
+        self.skills: dict[str, Any] = {}
+        self.skill_listing_text: str | None = None
+        self._sessions: dict[str, Session] = {}
+        self.subagent_registry: Any = None
+        self.subagent_run_counters: dict[str, int] = {}
+        self.extra_subagents: list[AgentDefinition] = list(extra_subagents or [])
+        self.enable_worker_tools = bool(enable_worker_tools)
+        self.retain_subagents = bool(retain_subagents)
+        self.enable_background_subagents = bool(enable_background_subagents)
+        self.enable_task_stop = bool(enable_task_stop)
         self._skills_connect: Any = None
         self._subagents_connect: Any = None
         self._mcp_connect: Any = None
         self._mcp_connection: Any = None
 
-        self._cached_system_blocks: list[SystemBlock] | None = None
+    def _configure_loop_guard(self, loop_guard: Any, loop_guard_alias: Any) -> None:
+        from .loop_guard import LoopGuard as _LoopGuard
+        from .loop_guard import normalize_loop_guard as _normalize_loop_guard
+
+        effective_lg = loop_guard_alias if loop_guard_alias is not _UNSET else loop_guard
+        if effective_lg is _UNSET:
+            self.loop_guard: _LoopGuard | None = _LoopGuard()
+        else:
+            self.loop_guard = _normalize_loop_guard(effective_lg)
+
+    def _configure_hooks(self, observers: Any, middleware: Any) -> None:
+        from .observability import normalize_observers as _normalize_observers
+
+        self._observers: list[Any] = _normalize_observers(observers)
+        self.middleware: list[Any] = normalize_middleware(middleware)
+
+    def _configure_filesystem(self, filesystem: Any, result_offload: Any) -> None:
+        self._filesystem_default: Any = filesystem
+        self.result_offload: Any = _resolve_result_offload(
+            result_offload,
+            self.provider,
+            self.model,
+        )
+        if not self._filesystem_active():
+            return
+
+        from .filesystem.tools import filesystem_tools as _fs_tools
+
+        for t in _fs_tools():
+            try:
+                self.tools.register(t)
+            except Exception:
+                pass  # already registered (e.g. caller added them manually)
+        self._refresh_system_blocks()
 
     def _filesystem_active(self) -> bool:
         """Return True when the virtual filesystem subsystem should be on."""
@@ -523,7 +592,7 @@ class Agent:
         # ── env block (always included) ──────────────────────────────────────
         env_text = (
             f"Environment:\n\n"
-            f"- Linch version: 0.1.0\n"
+            f"- Linch version: {get_version()}\n"
             f"- Working directory: {self.cwd}\n"
             f"- OS: {os_info}\n"
             f"- Shell: {shell}\n"
@@ -718,7 +787,7 @@ class Agent:
         async def _load() -> None:
             from .mcp import connect_mcp_servers
 
-            mcp_conn = await connect_mcp_servers(self._mcp_servers)
+            mcp_conn = await connect_mcp_servers(cast(Any, self._mcp_servers))
             for tool in mcp_conn.tools:
                 self.tools.register(cast("Tool", tool))
             self._mcp_connection = mcp_conn
@@ -774,12 +843,15 @@ class Agent:
             if not isinstance(rec, dict):
                 continue
             session.invoked_skills.append(
+                # Stored metadata may come from JSON backends; normalize defensively.
                 InvokedSkillRecord(
                     name=str(rec.get("name", "")),
                     substituted_body=str(
                         rec.get("substituted_body", rec.get("substitutedBody", ""))
                     ),
-                    invoked_at=float(rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0),
+                    invoked_at=float(
+                        cast(Any, rec.get("invoked_at", rec.get("invokedAt", 0.0)) or 0.0)
+                    ),
                 )
             )
         self._sessions[record.id] = session
@@ -822,5 +894,5 @@ class Agent:
 
 def _normalize_permission_mode(raw: object) -> PermissionMode:
     if raw in {"default", "acceptEdits", "skip-dangerous"}:
-        return raw
+        return cast(PermissionMode, raw)
     raise ConfigError("permissions.mode must be one of: default, acceptEdits, skip-dangerous")

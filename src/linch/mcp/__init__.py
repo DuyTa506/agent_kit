@@ -9,8 +9,8 @@ from .config import (
 from .naming import build_mcp_tool_name, normalize_name_for_mcp
 
 try:
-    from .client import McpConnection, connect_mcp_servers
-    from .tool import make_mcp_tool
+    from .client import McpConnection, connect_mcp_servers  # type: ignore[assignment]
+    from .tool import make_mcp_tool  # type: ignore[assignment]
 except ModuleNotFoundError as exc:
     missing_name = getattr(exc, "name", None)
     if missing_name not in {None, "mcp"} and not str(missing_name).startswith("mcp."):

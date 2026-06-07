@@ -297,13 +297,13 @@ async def demo_parallel_analysts() -> None:
     from linch.tools.registry import tools_from_defaults
 
     SUBSYSTEMS = [
-        ("tools/", "tool implementations"),
-        ("providers/", "provider adapters"),
-        ("memory/", "memory subsystem"),
+        ("tools", "tools/", "tool implementations"),
+        ("providers", "providers/", "provider adapters"),
+        ("memory", "memory/", "memory subsystem"),
     ]
     task_list = "\n".join(
         f"- Subsystem '{name}' at {ROOT / 'src' / 'linch' / path}: {focus}"
-        for path, focus in SUBSYSTEMS
+        for name, path, focus in SUBSYSTEMS
     )
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -424,7 +424,9 @@ async def demo_subagent_with_offload() -> None:
             if isinstance(event, SubagentEvent):
                 inner = event.event
                 if inner.type == "tool_call_end" and getattr(inner, "tool_name", "") == "Read":
-                    offloaded = inner.result != inner.tool_result.content if inner.tool_result else False
+                    offloaded = (
+                        inner.result != inner.tool_result.content if inner.tool_result else False
+                    )
                     tag = " [offloaded]" if offloaded else ""
                     print(f"    [researcher] Read → {len(inner.result)} chars{tag}")
                 if inner.type == "result":

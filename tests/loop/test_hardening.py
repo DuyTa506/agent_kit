@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import linch.tools.builtin as builtin_tools
 from linch.abort import AbortContext
 from linch.events import (
     ResultEvent,
@@ -15,10 +16,10 @@ from linch.events import (
     event_from_dict,
     event_to_dict,
 )
-from linch.permissions import PendingToolCall, PermissionEngine
+from linch.permissions import BashRule, PendingToolCall, PermissionEngine
 from linch.scheduler import execute_tool_calls
 from linch.tools import Citation, ToolContext, ToolRegistry, ToolResult
-from linch.tools.builtin import GlobTool, GrepTool, WriteTool
+from linch.tools.builtin import BashTool, GlobTool, GrepTool, WriteTool
 from linch.types import ToolUseBlock, Usage
 
 
@@ -132,6 +133,68 @@ async def test_grep_and_glob_are_confined_to_cwd(tmp_path) -> None:
     assert glob.is_error is True
     assert "escapes cwd" in grep.content
     assert "escapes cwd" in glob.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_uses_root_dir_relative_paths(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builtin_tools, "_RG_PATH", None)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("needle = True\n", encoding="utf-8")
+    ctx = ToolContext(
+        cwd=str(tmp_path),
+        session_id="s",
+        run_id="r",
+        session_store=None,
+    )
+
+    result = await GrepTool().execute({"pattern": "needle", "glob": "**/*.py"}, ctx)
+
+    assert result.is_error is False
+    assert result.content == "pkg/mod.py"
+
+
+@pytest.mark.asyncio
+async def test_glob_python_fallback_uses_root_dir_relative_paths(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(builtin_tools, "_RG_PATH", None)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("x\n", encoding="utf-8")
+    ctx = ToolContext(
+        cwd=str(tmp_path),
+        session_id="s",
+        run_id="r",
+        session_store=None,
+    )
+
+    result = await GlobTool().execute({"glob_pattern": "**/*.py"}, ctx)
+
+    assert result.is_error is False
+    assert result.content == "pkg/mod.py"
+
+
+def test_bash_rule_accepts_pattern_and_patterns() -> None:
+    tool = BashTool()
+    allow_engine = PermissionEngine(
+        mode="default",
+        rules=[BashRule(pattern="git status", decision="allow")],
+    )
+    deny_engine = PermissionEngine(
+        mode="skip-dangerous",
+        rules=[BashRule(patterns=["rm -rf*", "sudo *"], decision="deny")],
+    )
+
+    allowed = allow_engine.evaluate(
+        PendingToolCall(tool_use_id="t1", tool=tool, input={"command": "git status --short"})
+    )
+    denied = deny_engine.evaluate(
+        PendingToolCall(tool_use_id="t2", tool=tool, input={"command": "rm -rf build"})
+    )
+
+    assert allowed.decision == "allow"
+    assert denied.decision == "deny"
 
 
 def test_event_round_trip() -> None:

@@ -333,10 +333,11 @@ async def test_loop_drains_pending_notifications_at_turn_start() -> None:
     session = await agent.session(id="s1")
 
     # Pre-populate a fake notification (simulates a completed background worker)
-    note_text = "<task-notification><task-id>agent-1234</task-id><status>completed</status><result>done</result></task-notification>"
-    session.pending_notifications.append(
-        Message(role="user", content=[TextBlock(text=note_text)])
+    note_text = (
+        "<task-notification><task-id>agent-1234</task-id><status>completed</status>"
+        "<result>done</result></task-notification>"
     )
+    session.pending_notifications.append(Message(role="user", content=[TextBlock(text=note_text)]))
 
     events = await _collect(session.run("hello"))
 
@@ -370,7 +371,6 @@ async def test_notification_lands_in_provider_view_before_provider_call() -> Non
             yield {"type": "text_delta", "text": "done"}
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
-    from collections.abc import AsyncIterator
 
     session_store = _memory_session_store()
     agent = _agent(
@@ -381,10 +381,11 @@ async def test_notification_lands_in_provider_view_before_provider_call() -> Non
     )
     session = await agent.session(id="s1")
 
-    note_text = "<task-notification><task-id>agent-abcd</task-id><status>completed</status><result>ok</result></task-notification>"
-    session.pending_notifications.append(
-        Message(role="user", content=[TextBlock(text=note_text)])
+    note_text = (
+        "<task-notification><task-id>agent-abcd</task-id><status>completed</status>"
+        "<result>ok</result></task-notification>"
     )
+    session.pending_notifications.append(Message(role="user", content=[TextBlock(text=note_text)]))
 
     await _collect(session.run("hello"))
 
@@ -421,7 +422,6 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
             yield {"type": "text_delta", "text": "done"}
             yield {"type": "message_end", "stop_reason": "end_turn", "usage": Usage()}
 
-    from collections.abc import AsyncIterator
 
     child_provider = BlockingProvider()
     # Parent uses a ScriptProvider that calls Subagent with run_in_background=True,
@@ -447,8 +447,8 @@ async def test_loop_abort_cancels_background_worker_tasks() -> None:
     task = asyncio.create_task(blocking_task())
 
     # Register the handle on the session
-    from linch.subagents.workers import WorkerHandle
     from linch.subagents.types import AgentDefinition, AgentFrontmatter
+    from linch.subagents.workers import WorkerHandle
 
     dummy_def = AgentDefinition(
         name="test",

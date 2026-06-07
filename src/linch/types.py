@@ -210,9 +210,19 @@ def block_from_dict(raw: dict[str, Any]) -> ContentBlock:
             id=str(raw["id"]), name=str(raw["name"]), input=dict(raw.get("input", {}))
         )
     if typ == "tool_result":
-        content = raw.get("content", "")
-        if isinstance(content, list):
-            content = [block_from_dict(item) for item in content]
+        raw_content = raw.get("content", "")
+        content: str | list[TextBlock | ImageBlock]
+        if isinstance(raw_content, list):
+            nested: list[TextBlock | ImageBlock] = []
+            for item in raw_content:
+                if not isinstance(item, dict):
+                    continue
+                block = block_from_dict(item)
+                if isinstance(block, TextBlock | ImageBlock):
+                    nested.append(block)
+            content = nested
+        else:
+            content = str(raw_content)
         return ToolResultBlock(
             tool_use_id=str(raw["tool_use_id"]),
             content=content,

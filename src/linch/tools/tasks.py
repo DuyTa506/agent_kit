@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from linch.sessions.tasks import CreateTaskInput, TaskPatch
+from typing import Literal, cast
+
+from linch.sessions.tasks import CreateTaskInput, TaskPatch, TaskStatus
 from linch.tools.base import ToolContext, ToolResult, ToolScope, require_str
 
 
@@ -40,15 +42,17 @@ class TaskCreateTool:
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        active_form = input.get("active_form")
+        metadata = input.get("metadata")
         task = await ctx.session_store.create_task(
             ctx.session_id,
             CreateTaskInput(
                 subject=str(input["subject"]),
                 description=str(input["description"]),
-                active_form=input.get("active_form")
-                if isinstance(input.get("active_form"), str)
+                active_form=active_form if isinstance(active_form, str) else None,
+                metadata=cast("dict[str, object]", metadata)
+                if isinstance(metadata, dict)
                 else None,
-                metadata=input.get("metadata") if isinstance(input.get("metadata"), dict) else None,
             ),
         )
         return ToolResult(
@@ -165,33 +169,37 @@ class TaskUpdateTool:
         return out
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
+        subject = input.get("subject")
+        description = input.get("description")
+        active_form = input.get("active_form")
+        status = input.get("status")
+        owner = input.get("owner")
+        add_blocks = input.get("add_blocks")
+        add_blocked_by = input.get("add_blocked_by")
+        remove_blocks = input.get("remove_blocks")
+        remove_blocked_by = input.get("remove_blocked_by")
+        metadata = input.get("metadata")
         patch = TaskPatch(
-            subject=(input.get("subject") if isinstance(input.get("subject"), str) else None),
-            description=(
-                input.get("description") if isinstance(input.get("description"), str) else None
-            ),
-            active_form=(
-                input.get("active_form") if isinstance(input.get("active_form"), str) else None
-            ),
-            status=input.get("status") if isinstance(input.get("status"), str) else None,
-            owner=input.get("owner") if isinstance(input.get("owner"), str) else None,
-            add_blocks=(
-                input.get("add_blocks") if isinstance(input.get("add_blocks"), list) else None
-            ),
+            subject=subject if isinstance(subject, str) else None,
+            description=description if isinstance(description, str) else None,
+            active_form=active_form if isinstance(active_form, str) else None,
+            status=cast(TaskStatus | Literal["deleted"], status)
+            if status in {"pending", "in_progress", "completed", "deleted"}
+            else None,
+            owner=owner if isinstance(owner, str) else None,
+            add_blocks=cast("list[str]", add_blocks) if isinstance(add_blocks, list) else None,
             add_blocked_by=(
-                input.get("add_blocked_by")
-                if isinstance(input.get("add_blocked_by"), list)
-                else None
+                cast("list[str]", add_blocked_by) if isinstance(add_blocked_by, list) else None
             ),
             remove_blocks=(
-                input.get("remove_blocks") if isinstance(input.get("remove_blocks"), list) else None
+                cast("list[str]", remove_blocks) if isinstance(remove_blocks, list) else None
             ),
             remove_blocked_by=(
-                input.get("remove_blocked_by")
-                if isinstance(input.get("remove_blocked_by"), list)
+                cast("list[str]", remove_blocked_by)
+                if isinstance(remove_blocked_by, list)
                 else None
             ),
-            metadata=(input.get("metadata") if isinstance(input.get("metadata"), dict) else None),
+            metadata=cast("dict[str, object]", metadata) if isinstance(metadata, dict) else None,
         )
         task = await ctx.session_store.update_task(ctx.session_id, str(input["id"]), patch)
         if task is None and patch.status == "deleted":

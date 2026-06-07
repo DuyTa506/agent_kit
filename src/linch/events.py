@@ -370,8 +370,7 @@ def tool_result_from_dict(raw: dict[str, Any]) -> ToolResult:
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:
-    typ = event.type
-    if typ == "system":
+    if isinstance(event, SystemEvent):
         return {
             "type": event.type,
             "subtype": event.subtype,
@@ -382,17 +381,17 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "permission_mode": event.permission_mode,
             "cwd": event.cwd,
         }
-    if typ == "user":
+    if isinstance(event, UserEvent):
         return {"type": event.type, "message": message_to_dict(event.message)}
-    if typ == "assistant":
+    if isinstance(event, AssistantEvent):
         return {
             "type": event.type,
             "message": message_to_dict(event.message),
             "stop_reason": event.stop_reason,
         }
-    if typ == "partial_assistant":
+    if isinstance(event, PartialAssistantEvent):
         return {"type": event.type, "delta": event.delta}
-    if typ == "tool_call_start":
+    if isinstance(event, ToolCallStartEvent):
         return {
             "type": event.type,
             "tool_use_id": event.tool_use_id,
@@ -400,7 +399,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "input": event.input,
             "summary": event.summary,
         }
-    if typ == "tool_call_end":
+    if isinstance(event, ToolCallEndEvent):
         out = {
             "type": event.type,
             "tool_use_id": event.tool_use_id,
@@ -412,7 +411,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         if event.tool_result is not None:
             out["tool_result"] = tool_result_to_dict(event.tool_result)
         return out
-    if typ == "permission_request":
+    if isinstance(event, PermissionRequestEvent):
         return {
             "type": event.type,
             "requests": [
@@ -425,13 +424,13 @@ def event_to_dict(event: Event) -> dict[str, Any]:
                 for req in event.requests
             ],
         }
-    if typ == "usage":
+    if isinstance(event, UsageEvent):
         return {
             "type": event.type,
             "usage": usage_to_dict(event.usage),
             "cumulative": usage_to_dict(event.cumulative),
         }
-    if typ == "compaction":
+    if isinstance(event, CompactionEvent):
         return {
             "type": event.type,
             "messages_before": event.messages_before,
@@ -440,7 +439,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "tokens_after": event.tokens_after,
             "strategy": event.strategy,
         }
-    if typ == "context_build":
+    if isinstance(event, ContextBuildEvent):
         return {
             "type": event.type,
             "system_blocks": event.system_blocks,
@@ -449,7 +448,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "budget": dict(event.budget),
             "metadata": dict(event.metadata),
         }
-    if typ == "result":
+    if isinstance(event, ResultEvent):
         d: dict[str, Any] = {
             "type": event.type,
             "subtype": event.subtype,
@@ -463,11 +462,11 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         if event.structured_error is not None:
             d["structured_error"] = event.structured_error
         return d
-    if typ == "error":
+    if isinstance(event, ErrorEvent):
         return {"type": event.type, "error": event.error}
-    if typ == "skills_loaded":
+    if isinstance(event, SkillsLoadedEvent):
         return {"type": event.type, "skills": event.skills}
-    if typ == "skill_invoked":
+    if isinstance(event, SkillInvokedEvent):
         return {
             "type": event.type,
             "name": event.name,
@@ -475,9 +474,9 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "model_override": event.model_override,
             "allowed_tools": event.allowed_tools,
         }
-    if typ == "skill_completed":
+    if isinstance(event, SkillCompletedEvent):
         return {"type": event.type, "name": event.name, "is_error": event.is_error}
-    if typ == "subagent_event":
+    if isinstance(event, SubagentEvent):
         return {
             "type": event.type,
             "parent_session_id": event.parent_session_id,
@@ -486,21 +485,21 @@ def event_to_dict(event: Event) -> dict[str, Any]:
             "display_name": event.display_name,
             "event": event_to_dict(event.event),
         }
-    if typ == "background_worker":
+    if isinstance(event, BackgroundWorkerEvent):
         return {
             "type": event.type,
             "worker_id": event.worker_id,
             "status": event.status,
             "display_name": event.display_name,
         }
-    if typ == "loop_guard":
+    if isinstance(event, LoopGuardEvent):
         return {
             "type": event.type,
             "reason": event.reason,
             "detail": event.detail,
             "action": event.action,
         }
-    raise ValueError(f"unknown event type: {typ}")
+    raise ValueError(f"unknown event type: {getattr(event, 'type', '<missing>')}")
 
 
 def event_from_dict(raw: dict[str, Any]) -> Event:

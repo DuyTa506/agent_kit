@@ -157,6 +157,8 @@ def _parse_frontmatter(raw: str, dir_name: str) -> dict:
         description = doc.get("description")
         if not isinstance(description, str) or description.strip() == "":
             fail("frontmatter 'description' is required and must be a non-empty string")
+        assert isinstance(description, str)
+        description = description.strip()
 
         name = dir_name
         raw_name = doc.get("name")

@@ -28,6 +28,11 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from linch.providers import OpenAIChatCompletionsProvider
+    from linch.providers.anthropic import AnthropicProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 DEEPSEEK_BASE_OPENAI = "https://api.deepseek.com"
@@ -49,7 +54,7 @@ def load_project_env() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-def _make_openai_provider(api_key: str) -> "OpenAIChatCompletionsProvider":
+def _make_openai_provider(api_key: str) -> OpenAIChatCompletionsProvider:
     from linch.providers import OpenAIChatCompletionsProvider
     from linch.providers.openai_chat import OpenAIChatProviderOptions
 
@@ -58,7 +63,7 @@ def _make_openai_provider(api_key: str) -> "OpenAIChatCompletionsProvider":
     )
 
 
-def _make_anthropic_provider(api_key: str) -> "AnthropicProvider":
+def _make_anthropic_provider(api_key: str) -> AnthropicProvider:
     from linch.providers.anthropic import AnthropicProvider, AnthropicProviderOptions
 
     return AnthropicProvider(

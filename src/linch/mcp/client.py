@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -16,8 +17,8 @@ VERSION = "0.1.0"
 
 @dataclass(slots=True)
 class _OpenSession:
-    transport: object
-    session: ClientSession
+    transport: Any
+    session: Any
 
 
 class McpConnection:
@@ -85,13 +86,13 @@ async def connect_mcp_servers(
     return McpConnection(tools=tools, sessions=opened)
 
 
-async def _connect_one(name: str, config: McpServerConfig) -> tuple[object, ClientSession]:
+async def _connect_one(name: str, config: McpServerConfig) -> tuple[Any, ClientSession]:
     if mcp_server_type(config) == "http":
         return await _connect_http(name, config)
     return await _connect_stdio(name, config)
 
 
-async def _connect_stdio(name: str, config: object) -> tuple[object, ClientSession]:
+async def _connect_stdio(name: str, config: object) -> tuple[Any, ClientSession]:
     transport = stdio_client(
         StdioServerParameters(
             command=getattr(config, "command", ""),
@@ -110,7 +111,7 @@ async def _connect_stdio(name: str, config: object) -> tuple[object, ClientSessi
         raise
 
 
-async def _connect_http(name: str, config: object) -> tuple[object, ClientSession]:
+async def _connect_http(name: str, config: object) -> tuple[Any, ClientSession]:
     url = str(getattr(config, "url", ""))
     headers = dict(getattr(config, "headers", None) or {})
     transport = streamablehttp_client(url, headers=headers)
@@ -129,7 +130,7 @@ def _make_call_tool(session: ClientSession):
     async def _call(name: str, args: dict, signal: object) -> object:
         from ..abort import throw_if_aborted
 
-        throw_if_aborted(signal)
+        throw_if_aborted(cast(Any, signal))
         return await session.call_tool(name, args or {})
 
     return _call

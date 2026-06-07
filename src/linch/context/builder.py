@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ..types import Message, SystemBlock, TextBlock
 
@@ -71,7 +71,7 @@ def normalize_context_builder(
         if isinstance(builder, Iterable) and not hasattr(builder, "build"):
             builders.extend(builder)
         else:
-            builders.append(builder)
+            builders.append(cast(ContextBuilder, builder))
 
     if not builders:
         return None
@@ -133,7 +133,7 @@ def _estimate_context_tokens(
     system_tokens = _estimate_text("\n".join(block.text for block in system_blocks))
     if callable(estimator):
         try:
-            return system_tokens + max(0, int(estimator(messages, model)))
+            return system_tokens + max(0, int(cast(Any, estimator(messages, model))))
         except Exception:
             pass
     return system_tokens + sum(_estimate_message(message) for message in messages)

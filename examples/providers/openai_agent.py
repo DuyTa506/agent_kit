@@ -24,6 +24,10 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from linch.providers import OpenAIChatCompletionsProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -43,7 +47,7 @@ def load_project_env() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
-def _make_provider(api_key: str) -> "OpenAIChatCompletionsProvider":
+def _make_provider(api_key: str) -> OpenAIChatCompletionsProvider:
     from linch.providers import OpenAIChatCompletionsProvider
     from linch.providers.openai_chat import OpenAIChatProviderOptions
 

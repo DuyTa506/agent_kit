@@ -5,6 +5,7 @@ import glob
 import re
 import shutil
 from pathlib import Path
+from typing import Any, cast
 
 from linch.errors import ToolExecutionError
 
@@ -57,7 +58,7 @@ class ReadTool:
         for key in ("offset", "limit"):
             v = raw.get(key)
             if v is not None:
-                result[key] = int(v)
+                result[key] = _to_int(v, 0)
         return result
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
@@ -71,8 +72,8 @@ class ReadTool:
             ctx.file_read_tracker.mark_read(str(path))
 
         lines = text.split("\n")
-        offset = int(input.get("offset", 1) or 1)
-        limit = int(input.get("limit", 2000) or 2000)
+        offset = _to_int(input.get("offset"), 1) or 1
+        limit = _to_int(input.get("limit"), 2000) or 2000
         if offset > 0 or limit > 0:
             start = max(0, offset - 1) if offset > 0 else 0
             end = start + limit if limit > 0 else len(lines)
@@ -243,11 +244,11 @@ class BashTool:
         timeout = raw.get("timeout_ms", 120000)
         return {
             "command": require_str(raw, "command"),
-            "timeout_ms": min(int(timeout), 1800000),
+            "timeout_ms": min(_to_int(timeout, 120000), 1800000),
         }
 
     async def execute(self, input: dict[str, object], ctx: ToolContext) -> ToolResult:
-        timeout_s = float(input["timeout_ms"]) / 1000.0
+        timeout_s = _to_float(input.get("timeout_ms"), 120000.0) / 1000.0
         proc = await asyncio.create_subprocess_shell(
             str(input["command"]),
             cwd=ctx.cwd,
@@ -302,6 +303,18 @@ _TYPE_GLOBS: dict[str, str] = {
     "swift": "**/*.swift",
     "kt": "**/*.kt",
 }
+
+
+def _to_int(value: object, default: int) -> int:
+    if value is None:
+        return default
+    return int(cast(Any, value))
+
+
+def _to_float(value: object, default: float) -> float:
+    if value is None:
+        return default
+    return float(cast(Any, value))
 
 
 def _is_binary(buf: bytes) -> bool:
@@ -362,9 +375,12 @@ def _run_grep_via_rg(
     search_root: str,
     timeout: float = 120.0,
 ) -> tuple[str, int]:
+    rg_path = _RG_PATH
+    if rg_path is None:
+        raise ToolExecutionError("ripgrep is not available")
     proc = asyncio.run(
         asyncio.create_subprocess_exec(
-            _RG_PATH,
+            rg_path,
             *args,
             cwd=search_root,
             stdout=asyncio.subprocess.PIPE,
@@ -380,8 +396,11 @@ async def _run_grep_via_rg_async(
     search_root: str,
     timeout: float = 120.0,
 ) -> tuple[str, int]:
+    rg_path = _RG_PATH
+    if rg_path is None:
+        raise ToolExecutionError("ripgrep is not available")
     proc = await asyncio.create_subprocess_exec(
-        _RG_PATH,
+        rg_path,
         *args,
         cwd=search_root,
         stdout=asyncio.subprocess.PIPE,
@@ -484,17 +503,12 @@ def _grep_fallback(
 
 
 def _glob_files(root: str, pattern: str) -> list[str]:
-    from pathlib import Path
-
     paths = glob.glob(pattern, root_dir=root, recursive=True)
-    root_path = Path(root)
     result: list[str] = []
     for p in paths:
-        try:
-            rel = str(Path(p).relative_to(root_path))
-        except ValueError:
-            continue
-        if not rel.startswith("."):
+        path = Path(p)
+        rel = str(path if not path.is_absolute() else path.relative_to(root))
+        if rel and not rel.startswith("."):
             result.append(rel)
     return sorted(result)
 
@@ -569,7 +583,7 @@ class GrepTool:
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         pattern = require_str(raw, "pattern")
         if not pattern:
-            raise ToolExecutionError("pattern must be non-empty", tool_name=self.name)
+            raise ToolExecutionError("pattern must be non-empty")
         result: dict[str, object] = {"pattern": pattern}
         for opt in (
             "path",
@@ -587,7 +601,7 @@ class GrepTool:
         for num in ("-A", "-B", "-C", "head_limit"):
             v = raw.get(num)
             if v is not None:
-                result[num] = int(v)
+                result[num] = _to_int(v, 0)
         return result
 
     def summarize(self, input: dict[str, object]) -> str:
@@ -610,13 +624,13 @@ class GrepTool:
                 is_error=True,
             )
         output_mode = str(input.get("output_mode", "files_with_matches"))
-        head_limit = int(input.get("head_limit", _DEFAULT_HEAD_LIMIT))
+        head_limit = _to_int(input.get("head_limit"), _DEFAULT_HEAD_LIMIT)
         ignore_case = bool(input.get("-i", False))
         multiline = bool(input.get("multiline", False))
         show_ln = bool(input.get("-n", False))
-        ctx_a = int(input.get("-A", 0) or 0)
-        ctx_b = int(input.get("-B", 0) or 0)
-        ctx_c = int(input.get("-C", 0) or 0)
+        ctx_a = _to_int(input.get("-A"), 0) or 0
+        ctx_b = _to_int(input.get("-B"), 0) or 0
+        ctx_c = _to_int(input.get("-C"), 0) or 0
         glob_filter = str(input.get("glob", "") or "")
         type_filter = str(input.get("type", "") or "")
 
@@ -719,9 +733,9 @@ class GlobTool:
         if pattern is None:
             pattern = raw.get("pattern")
         if not isinstance(pattern, str) or pattern == "":
-            raise ToolExecutionError("glob_pattern must be non-empty", tool_name=self.name)
+            raise ToolExecutionError("glob_pattern must be non-empty")
         if not pattern:
-            raise ToolExecutionError("pattern must be non-empty", tool_name=self.name)
+            raise ToolExecutionError("pattern must be non-empty")
         result: dict[str, object] = {"glob_pattern": pattern}
         target = raw.get("target_directory")
         if target is None:

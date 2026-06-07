@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from .abort import AbortContext, throw_if_aborted
 from .errors import AbortError, ToolTimeoutError
@@ -227,6 +227,7 @@ async def _execute_one(
 
         attempt_start = time.perf_counter()
         try:
+            assert tool is not None
             effective_input = _effective_input(call, decision)
             coro = tool.execute(effective_input, ctx)
             if result_timeout_ms is None:
@@ -345,6 +346,8 @@ def _resource_accesses(
         if raw is None:
             return []
         result: list[ResourceAccess] = []
+        if not isinstance(raw, list | tuple):
+            return []
         for item in raw:
             if isinstance(item, ResourceAccess):
                 result.append(item)
@@ -370,7 +373,7 @@ def _max_concurrency(agent: Any) -> int:
     if raw is None:
         raw = getattr(agent, "tool_concurrency", None)
     try:
-        value = int(raw)
+            value = int(cast(Any, raw))
     except (TypeError, ValueError):
         value = 1
     return max(1, value)
@@ -522,7 +525,7 @@ async def execute_tool_calls(
 
         if initial.decision == "ask":
             allowed_tools = getattr(session, "current_turn_allowed_tools", None)
-            if allowed_tools and tool_obj.name in allowed_tools:
+            if allowed_tools and tool_obj is not None and tool_obj.name in allowed_tools:
                 decisions.append(PermissionDecision(decision="allow"))
             else:
                 ask_indices.append(i)

@@ -12,7 +12,10 @@ async def main() -> None:
     )
     session = await agent.session()
 
-    async for event in session.run("Check current files in this directory, delete file have content relate to Donald Trump"):
+    async for event in session.run(
+        "List the files in this directory and summarize what each filename suggests. "
+        "Do not modify or delete anything."
+    ):
         if event.type == "assistant":
             for block in event.message.content:
                 if block.type == "text":

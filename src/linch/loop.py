@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from .compaction import build_compaction_event, maybe_compact, run_forced_compaction
@@ -36,9 +36,11 @@ from .scheduler import execute_tool_calls
 from .session import RunOptions, Session
 from .types import (
     AssistantAssembly,
+    ContentBlock,
     ImageBlock,
     Message,
     ProviderRequest,
+    StopReason,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -47,9 +49,24 @@ from .types import (
     message_to_dict,
 )
 
+ProviderEffort = Literal["low", "medium", "high", "xhigh", "max"]
+CacheTtl = Literal["5m", "1h"]
+
+
+def _provider_effort(value: str | None) -> ProviderEffort | None:
+    if value in {"low", "medium", "high", "xhigh", "max"}:
+        return cast(ProviderEffort, value)
+    return None
+
+
+def _cache_ttl(value: str | None) -> CacheTtl | None:
+    if value in {"5m", "1h"}:
+        return cast(CacheTtl, value)
+    return None
+
 
 def build_user_message(prompt: str, images: list[dict[str, str]] | None = None) -> Message:
-    content = [
+    content: list[ContentBlock] = [
         TextBlock(text="<env>\nToday's date: " + time.strftime("%Y-%m-%d") + "\n</env>"),
         TextBlock(text=prompt),
     ]
@@ -204,11 +221,11 @@ def _build_turn_request(
         max_output_tokens=opts.max_output_tokens or agent.max_output_tokens,
         temperature=opts.temperature,
         thinking=opts.thinking,
-        effort=opts.effort or None,
+        effort=_provider_effort(opts.effort),
         output_schema=opts.output_schema or agent.output_schema,
         tool_choice=opts.tool_choice or agent.tool_choice,
         max_retries=agent.max_retries,
-        cache_ttl=agent.cache_ttl,
+        cache_ttl=_cache_ttl(agent.cache_ttl),
         cache_prompt=True,
     )
 
@@ -316,7 +333,7 @@ def _loop_guard_state_from_dict(raw: dict[str, object] | None) -> Any:
             if isinstance(call_counts_raw, dict)
             else {}
         ),
-        consecutive_failures=int(raw.get("consecutive_failures", 0) or 0),
+        consecutive_failures=int(cast(Any, raw.get("consecutive_failures", 0) or 0)),
     )
 
 
@@ -402,10 +419,10 @@ async def stream_turn(
     thinking_sig: str | None = None
     tool_inputs: dict[str, str] = {}
     tool_meta: dict[str, tuple[str, str]] = {}
-    content: list[TextBlock | ThinkingBlock | ToolUseBlock] = []
-    stop_reason = "end_turn"
+    content: list[ContentBlock] = []
+    stop_reason: StopReason = "end_turn"
     usage = Usage()
-    metadata = None
+    metadata: dict[str, Any] | None = None
 
     def flush_text() -> None:
         nonlocal text_buf
@@ -424,33 +441,40 @@ async def stream_turn(
         typ = event["type"]
         if typ == "text_delta":
             flush_thinking()
-            text_buf += event["text"]
+            text = str(event["text"])
+            text_buf += text
             if agent.include_partial_messages:
-                yield PartialAssistantEvent(delta={"kind": "text", "text": event["text"]})
+                yield PartialAssistantEvent(delta={"kind": "text", "text": text})
         elif typ == "thinking_delta":
             flush_text()
-            thinking_buf += event["text"]
-            thinking_sig = event.get("signature", thinking_sig)
+            text = str(event["text"])
+            thinking_buf += text
+            signature = event.get("signature", thinking_sig)
+            thinking_sig = signature if isinstance(signature, str) else thinking_sig
             if agent.include_partial_messages:
-                yield PartialAssistantEvent(delta={"kind": "thinking", "text": event["text"]})
+                yield PartialAssistantEvent(delta={"kind": "thinking", "text": text})
         elif typ == "tool_use_start":
             flush_text()
             flush_thinking()
-            tool_meta[event["id"]] = (event["id"], event["name"])
-            tool_inputs[event["id"]] = ""
+            tool_id = str(event["id"])
+            tool_meta[tool_id] = (tool_id, str(event["name"]))
+            tool_inputs[tool_id] = ""
         elif typ == "tool_use_input_delta":
-            tool_inputs[event["id"]] = tool_inputs.get(event["id"], "") + event["json_delta"]
+            tool_id = str(event["id"])
+            json_delta = str(event["json_delta"])
+            tool_inputs[tool_id] = tool_inputs.get(tool_id, "") + json_delta
             if agent.include_partial_messages:
                 yield PartialAssistantEvent(
                     delta={
                         "kind": "tool_use_input",
-                        "tool_use_id": event["id"],
-                        "json_delta": event["json_delta"],
+                        "tool_use_id": tool_id,
+                        "json_delta": json_delta,
                     }
                 )
         elif typ == "tool_use_end":
-            meta = tool_meta.pop(event["id"], None)
-            raw = tool_inputs.pop(event["id"], "")
+            tool_id = str(event["id"])
+            meta = tool_meta.pop(tool_id, None)
+            raw = tool_inputs.pop(tool_id, "")
             if meta is not None:
                 try:
                     parsed = json.loads(raw) if raw else {}
@@ -462,9 +486,11 @@ async def stream_turn(
         elif typ == "message_end":
             flush_text()
             flush_thinking()
-            stop_reason = event["stop_reason"]
-            usage = event["usage"]
-            metadata = event.get("provider_metadata")
+            stop_reason = cast(StopReason, event["stop_reason"])
+            raw_usage = event["usage"]
+            usage = raw_usage if isinstance(raw_usage, Usage) else Usage()
+            raw_metadata = event.get("provider_metadata")
+            metadata = raw_metadata if isinstance(raw_metadata, dict) else None
 
     message = Message(role="assistant", content=content, provider_metadata=metadata)
     yield AssistantAssembly(message=message, stop_reason=stop_reason, usage=usage)
@@ -828,9 +854,10 @@ async def _run_loop_impl(
 
             assembly: AssistantAssembly | None = None
             if resumed_assistant:
+                assert checkpoint.assistant_message is not None
                 assembly = AssistantAssembly(
                     message=checkpoint.assistant_message,
-                    stop_reason=checkpoint.assistant_stop_reason or "tool_use",
+                    stop_reason=cast(StopReason, checkpoint.assistant_stop_reason or "tool_use"),
                     usage=Usage(),
                 )
             else:
@@ -994,11 +1021,6 @@ async def _run_loop_impl(
                 pending_tool_blocks=tool_blocks,
                 completed_tool_results=completed_tool_results,
             )
-            result_blocks: list[ToolResultBlock] = [
-                completed_tool_results[block.id]
-                for block in tool_blocks
-                if block.id in completed_tool_results
-            ]
             async for event in execute_tool_calls(
                 missing_tool_blocks,
                 agent,
@@ -1056,7 +1078,9 @@ async def _run_loop_impl(
                         pending_tool_blocks=tool_blocks,
                         completed_tool_results=completed_tool_results,
                     )
-            result_blocks = [completed_tool_results[block.id] for block in tool_blocks]
+            result_blocks: list[ContentBlock] = [
+                completed_tool_results[block.id] for block in tool_blocks
+            ]
             result_message = Message(role="user", content=result_blocks)
             already_appended = (
                 resume_checkpoint is not None

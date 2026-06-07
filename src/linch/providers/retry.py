@@ -4,7 +4,7 @@ import asyncio
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from linch.errors import AbortError, ConfigError, RateLimitError
 
@@ -21,7 +21,8 @@ class RetryOptions:
 
 def _delay_for_error(err: Exception, attempt: int, opts: RetryOptions) -> float:
     if isinstance(err, RateLimitError) and getattr(err, "retry_after_seconds", None):
-        return min(float(err.retry_after_seconds) * 1000.0, float(opts.max_delay_ms))
+        retry_after = cast(float, err.retry_after_seconds)
+        return min(float(retry_after) * 1000.0, float(opts.max_delay_ms))
     exp = min(float(opts.base_delay_ms) * (2**attempt), float(opts.max_delay_ms))
     jitter = exp * opts.jitter * ((random.random() * 2.0) - 1.0)
     return max(0.0, exp + jitter)

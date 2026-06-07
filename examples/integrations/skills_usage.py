@@ -23,7 +23,6 @@ from typing import Any
 from linch import Agent, BaseProvider, FeatureFlags, Usage
 from linch.sessions import InMemorySessionStore
 
-
 SKILL_MD = """---
 description: Convert rough notes into a short stakeholder update.
 when_to_use: Use when the user asks to summarize progress for stakeholders.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from .abort import AbortContext
 from .events import CompactionEvent
@@ -249,7 +249,7 @@ def _estimate_tokens(agent: Any, messages: list[Message]) -> int:
     if callable(estimator):
         try:
             value = estimator(messages, agent.model)
-            return max(0, int(value))
+            return max(0, int(cast(Any, value)))
         except Exception:
             pass
 

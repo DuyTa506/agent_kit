@@ -3,13 +3,17 @@ from __future__ import annotations
 import fnmatch
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias, cast
 
 RuleDecision = Literal["allow", "deny", "ask"]
+BashPattern: TypeAlias = str | dict[str, str]
+BashRulePattern: TypeAlias = BashPattern | list[BashPattern]
 
 
 class ToolRule:
     __slots__ = ("kind", "tool", "arg", "decision")
+
+    decision: RuleDecision
 
     def __init__(
         self,
@@ -26,6 +30,8 @@ class ToolRule:
 class PathRule:
     __slots__ = ("kind", "tools", "paths", "decision")
 
+    decision: RuleDecision
+
     def __init__(
         self,
         paths: list[str],
@@ -41,13 +47,28 @@ class PathRule:
 class BashRule:
     __slots__ = ("kind", "pattern", "decision")
 
+    pattern: BashRulePattern
+    decision: RuleDecision
+
     def __init__(
         self,
-        pattern: str | dict[str, str],
-        decision: RuleDecision,
+        pattern: BashPattern | None = None,
+        decision: RuleDecision = "ask",
+        *,
+        patterns: list[BashPattern] | tuple[BashPattern, ...] | None = None,
     ) -> None:
+        if pattern is not None and patterns is not None:
+            raise ValueError("BashRule accepts either pattern or patterns, not both")
+        if patterns is not None:
+            if not patterns:
+                raise ValueError("BashRule patterns must not be empty")
+            resolved_pattern: BashRulePattern = list(patterns)
+        elif pattern is not None:
+            resolved_pattern = pattern
+        else:
+            raise ValueError("BashRule requires pattern or patterns")
         self.kind = "bash"
-        self.pattern = pattern
+        self.pattern = resolved_pattern
         self.decision = _validate_decision(decision)
 
 
@@ -88,13 +109,21 @@ def match_path_rule(
 
 def match_bash_rule(rule: BashRule, command_segment: str) -> bool:
     segment = command_segment.strip()
-    if isinstance(rule.pattern, str):
+    if isinstance(rule.pattern, list):
+        return any(_match_bash_pattern(pattern, segment) for pattern in rule.pattern)
+    return _match_bash_pattern(rule.pattern, segment)
+
+
+def _match_bash_pattern(pattern: str | dict[str, str], segment: str) -> bool:
+    if isinstance(pattern, str):
+        if fnmatch.fnmatch(segment, pattern) or pattern in segment:
+            return True
         return _tokens_start_with(
             tokenize_shell_prefix(segment),
-            tokenize_shell_prefix(rule.pattern),
+            tokenize_shell_prefix(pattern),
         )
     try:
-        compiled = re.compile(rule.pattern["regex"])
+        compiled = re.compile(pattern["regex"])
         return compiled.search(segment) is not None
     except re.error:
         return False
@@ -245,7 +274,7 @@ def _first_matching_bash_decision(
 
 def _validate_decision(decision: str) -> RuleDecision:
     if decision in {"allow", "deny", "ask"}:
-        return decision
+        return cast(RuleDecision, decision)
     raise ValueError(f"invalid rule decision: {decision!r}")
 
 
