@@ -23,7 +23,7 @@ class TaskCreateTool:
         "required": ["subject", "description"],
     }
     scope: ToolScope = "write"
-    parallel_safe: bool = True
+    parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         subject = require_str(raw, "subject").strip()
@@ -69,7 +69,7 @@ class TaskListTool:
     description = "List all tasks for the current session."
     input_schema = {"type": "object", "properties": {}}
     scope: ToolScope = "read"
-    parallel_safe: bool = True
+    parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         return {}
@@ -94,7 +94,7 @@ class TaskGetTool:
         "required": ["id"],
     }
     scope: ToolScope = "read"
-    parallel_safe: bool = True
+    parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         return {"id": require_str(raw, "id")}
@@ -140,7 +140,7 @@ class TaskUpdateTool:
         "required": ["id"],
     }
     scope: ToolScope = "write"
-    parallel_safe: bool = True
+    parallel: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         out: dict[str, object] = {"id": require_str(raw, "id")}

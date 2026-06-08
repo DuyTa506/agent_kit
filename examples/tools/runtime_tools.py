@@ -49,7 +49,6 @@ class RuntimeLookupTool:
     }
     scope = "read"
     parallel = True
-    parallel_safe = True
     tags = ("runtime", "lookup")
     capabilities = ("kv.lookup",)
     cost_hint = "local"

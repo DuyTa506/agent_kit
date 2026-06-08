@@ -39,7 +39,7 @@ class FakeTool:
     description = "Fake tool."
     input_schema = {"type": "object", "properties": {}}
     scope: Any = "read"
-    parallel_safe = True
+    parallel = True
 
     def __init__(self, name: str) -> None:
         self.name = name

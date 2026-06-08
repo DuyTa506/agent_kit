@@ -21,7 +21,6 @@ class MemorySearchTool:
     }
     scope = "read"
     parallel = True
-    parallel_safe = True
     tags = ("memory", "rag", "search")
 
     def __init__(
@@ -115,7 +114,6 @@ class MemoryUpsertTool:
     }
     scope = "write"
     parallel = False
-    parallel_safe = False
     tags = ("memory", "write")
 
     def __init__(

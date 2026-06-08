@@ -58,7 +58,6 @@ class MyTool:
     name = "my_tool"
     scope = "read"
     parallel = True
-    parallel_safe = True
     ...
 
 # wrong — no base class
@@ -187,7 +186,7 @@ Tests should fail at the most specific possible assertion. Avoid mega-tests that
 
 1. Implement the duck-typed protocol (no base class).
 2. Choose `scope`: `"read"` (no side effects), `"write"` (creates/modifies files or state), `"exec"` (runs commands or external processes).
-3. Set `parallel = True` for read/search tools that can run concurrently. Keep `parallel_safe = True` too when supporting older integrations.
+3. Set `parallel = True` for read/search tools that can run concurrently.
 4. Add `resources(input) -> list[ResourceAccess]` when the tool touches files, indexes, databases, tenant state, or other shared resources. Read/read can overlap; write conflicts serialize.
 5. Use `ctx.deps` for shared application state — do not use global variables.
 6. Return `ToolResult` with `metadata`, `citations`, and `truncated` when the host app needs provenance or rich rendering.

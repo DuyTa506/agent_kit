@@ -29,7 +29,7 @@ class TaskStopTool:
     name = TASK_STOP_TOOL_NAME
     input_schema = TASK_STOP_TOOL_SCHEMA
     scope: ToolScope = "exec"
-    parallel_safe = True
+    parallel = True
 
     def __init__(self, get_session: Any) -> None:
         self._get_session = get_session

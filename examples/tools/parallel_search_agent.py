@@ -59,7 +59,6 @@ class SearchTool:
     }
     scope = "read"
     parallel = True
-    parallel_safe = True
     tags = ("search", "rag")
 
     def __init__(self, name: str, source: str, delay_s: float) -> None:

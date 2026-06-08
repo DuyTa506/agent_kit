@@ -30,7 +30,7 @@ class SubagentContinueTool:
     name = SUBAGENT_CONTINUE_TOOL_NAME
     input_schema = SUBAGENT_CONTINUE_TOOL_SCHEMA
     scope: ToolScope = "exec"
-    parallel_safe = True
+    parallel = True
 
     def __init__(self, get_session: Any) -> None:
         self._get_session = get_session

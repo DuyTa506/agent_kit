@@ -26,7 +26,7 @@ class SkillTool:
     )
     input_schema = SKILL_TOOL_SCHEMA
     scope = "exec"
-    parallel_safe = False
+    parallel = False
 
     def __init__(
         self,

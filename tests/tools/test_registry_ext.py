@@ -18,7 +18,6 @@ class FakeTool:
         self.tags = tags
         self.scope: ToolScope = "read"
         self.parallel = True
-        self.parallel_safe = True
 
     def validate(self, raw: dict) -> dict:
         return raw

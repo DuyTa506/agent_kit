@@ -4,8 +4,8 @@ Run:
     OPENAI_API_KEY=sk-... python examples/01_custom_tools.py
 
 Demonstrates:
-  1. Read-only tool           — parallel_safe=True, no side effects
-  2. Write tool               — parallel_safe=False, mutates state
+  1. Read-only tool           — parallel=True, no side effects
+  2. Write tool               — parallel=False, mutates state
   3. Exec tool                — scope="exec", runs external processes
   4. Tool with validation     — raises ValueError on bad input
   5. Tool using ctx.deps      — shares a Python object across all calls
@@ -32,7 +32,7 @@ MODEL = "gpt-5-nano-2025-08-07"
 # ── Pattern 1: Read-only, parallel-safe tool ─────────────────────────────────
 #
 # Good for: web search, KB lookup, database SELECT, API fetch.
-# parallel_safe=True means Linch will run this concurrently with other
+# parallel=True means Linch will run this concurrently with other
 # parallel-safe tools in the same turn — no lock needed.
 
 
@@ -45,7 +45,7 @@ class WeatherTool:
         "required": ["city"],
     }
     scope = "read"
-    parallel_safe = True  # safe to run concurrently
+    parallel = True  # safe to run concurrently
 
     def validate(self, raw: dict) -> dict:
         if not raw.get("city"):
@@ -67,7 +67,7 @@ class WeatherTool:
 # ── Pattern 2: Write tool (mutates state) ────────────────────────────────────
 #
 # Good for: saving to DB, updating a file, posting to an API.
-# parallel_safe=False ensures this runs serially — never concurrently.
+# parallel=False ensures this runs serially — never concurrently.
 
 
 class SaveNoteTool:
@@ -82,7 +82,7 @@ class SaveNoteTool:
         "required": ["title", "content"],
     }
     scope = "write"
-    parallel_safe = False  # writes must be serial
+    parallel = False  # writes must be serial
 
     def __init__(self, notebook: dict[str, str]) -> None:
         # State lives in the passed-in dict — shared across all calls.
@@ -126,7 +126,7 @@ class RunCommandTool:
         "required": ["command"],
     }
     scope = "exec"
-    parallel_safe = False
+    parallel = False
 
     def validate(self, raw: dict) -> dict:
         allowed = {"date", "hostname", "uptime"}
@@ -166,7 +166,7 @@ class SearchKbTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
 
     def validate(self, raw: dict) -> dict:
         if not raw.get("query"):
@@ -212,7 +212,7 @@ class CalculatorTool:
         "required": ["expression"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
 
     _SAFE_CHARS = set("0123456789 +-*/(). ")
 

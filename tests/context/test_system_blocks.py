@@ -14,7 +14,7 @@ def _make_fake_tool(name: str):
             self.description = f"Fake {n}"
             self.input_schema = {"type": "object", "properties": {}}
             self.scope = "read"
-            self.parallel_safe = True
+            self.parallel = True
 
         def validate(self, raw):
             return raw

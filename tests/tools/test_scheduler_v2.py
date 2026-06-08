@@ -67,7 +67,6 @@ class TimedTool:
         self.recorder = recorder
         self.scope: ToolScope = scope
         self.parallel = parallel
-        self.parallel_safe = parallel
         self.delay = delay
         self.output = output or name
 
@@ -99,7 +98,6 @@ class RichTool:
     input_schema = {"type": "object", "properties": {}}
     scope = "read"
     parallel = True
-    parallel_safe = True
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
         return raw
@@ -136,7 +134,6 @@ class InvalidTool:
     input_schema = {"type": "object", "properties": {}}
     scope = "read"
     parallel = True
-    parallel_safe = True
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("bad input")

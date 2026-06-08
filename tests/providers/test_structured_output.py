@@ -92,7 +92,7 @@ def _make_emit_tool():
             "required": ["sql"],
         }
         scope = "read"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw: dict) -> dict:
             return raw

@@ -185,7 +185,7 @@ class TenantDbTool:
     description = "Return the account balance for the current user."
     input_schema = {"type": "object", "properties": {}}
     scope = "read"
-    parallel_safe = True
+    parallel = True
 
     def validate(self, raw: dict) -> dict:
         return raw

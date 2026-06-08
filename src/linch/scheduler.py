@@ -325,7 +325,7 @@ def _tool_parallel(call: ResolvedCall) -> bool:
         return False
     if _tool_scope(call) != "read":
         return False
-    return bool(getattr(call.tool, "parallel", getattr(call.tool, "parallel_safe", False)))
+    return bool(getattr(call.tool, "parallel", False))
 
 
 def _resource_accesses(

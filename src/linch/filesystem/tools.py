@@ -52,7 +52,6 @@ class LsTool:
         },
     }
     scope: ToolScope = "read"
-    parallel_safe = True
     parallel = True
 
     def validate(self, raw: dict) -> dict:
@@ -106,7 +105,6 @@ class ReadFileTool:
         "required": ["path"],
     }
     scope: ToolScope = "read"
-    parallel_safe = True
     parallel = True
 
     def validate(self, raw: dict) -> dict:
@@ -170,7 +168,6 @@ class WriteFileTool:
         "required": ["path", "content"],
     }
     scope: ToolScope = "write"
-    parallel_safe = False
     parallel = False
 
     def validate(self, raw: dict) -> dict:
@@ -220,7 +217,6 @@ class EditFileTool:
         "required": ["path", "old_string", "new_string"],
     }
     scope: ToolScope = "write"
-    parallel_safe = False
     parallel = False
 
     def validate(self, raw: dict) -> dict:

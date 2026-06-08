@@ -58,7 +58,6 @@ class BigSearchTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True
     parallel = True
 
     def validate(self, raw: dict) -> dict:

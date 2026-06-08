@@ -48,7 +48,6 @@ class SleepyTool:
         self.delay = delay
         self.scope = scope
         self.parallel = parallel
-        self.parallel_safe = parallel
         self.finally_flag = finally_flag
         if execution_timeout_ms is not None:
             self.execution_timeout_ms = execution_timeout_ms
@@ -94,7 +93,6 @@ class FlakyTool:
         self.exc = exc or RuntimeError("transient failure")
         self.scope = scope
         self.parallel = parallel
-        self.parallel_safe = parallel
         self.retryable = retryable
         self.call_count = 0
 
@@ -386,7 +384,6 @@ async def test_timeout_is_retried_for_read_tool() -> None:
         input_schema = {"type": "object", "properties": {}}
         scope = "read"
         parallel = True
-        parallel_safe = True
 
         def validate(self, raw):
             return raw
@@ -429,7 +426,6 @@ async def test_abort_error_not_retried() -> None:
         input_schema = {"type": "object", "properties": {}}
         scope = "read"
         parallel = True
-        parallel_safe = True
 
         def validate(self, raw):
             return raw

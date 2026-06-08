@@ -69,7 +69,7 @@ Tools are **protocols** (duck-typed), not subclasses. Each tool has: `name`, `de
 
 `ToolContext` is passed to every `execute()` call and provides: `cwd`, `session_id`, `run_id`, `session_store`, `signal` (abort), `file_read_tracker`, `filesystem` (virtual `FileBackend` when the filesystem subsystem is enabled).
 
-Read tools with `parallel=True` or legacy `parallel_safe=True` may run concurrently. Write and exec tools serialize by default. Optional `ResourceAccess` declarations prevent overlapping read/write conflicts on the same resource. Concurrency limit: `Agent(max_tool_concurrency=...)` or `AGENTKIT_MAX_TOOL_CONCURRENCY` env var (default: CPU count).
+Read tools with `parallel=True` may run concurrently. Write and exec tools serialize by default. Optional `ResourceAccess` declarations prevent overlapping read/write conflicts on the same resource. Concurrency limit: `Agent(max_tool_concurrency=...)` or `AGENTKIT_MAX_TOOL_CONCURRENCY` env var (default: CPU count).
 
 **Timeouts**: `Agent(tool_timeout_ms=N)` sets an agent-wide execution deadline (env `AGENTKIT_TOOL_TIMEOUT_MS`). A tool may override with a class-level `execution_timeout_ms` attribute; `0` opts out. Default `None` = no timeout (zero-overhead, backward compatible). A timed-out tool returns `is_error=True` with an actionable message; the run continues. Implemented via `asyncio.wait_for` catching `asyncio.TimeoutError` (Python 3.10 safe). `ToolTimeoutError` (`kind="tool_timeout"`, `retryable=True`) is the typed exception for observer/policy use.
 

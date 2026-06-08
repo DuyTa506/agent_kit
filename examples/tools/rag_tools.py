@@ -1,6 +1,6 @@
 """RAG tools — hybrid_search, keyword_search, graph_search, web_search.
 
-All four are read-only (scope="read", parallel_safe=True) so Linch will
+All four are read-only (scope="read", parallel=True) so Linch will
 run them concurrently when the model calls multiple tools in one turn.
 
 Clients (vector store, graph DB, web search API) are injected via
@@ -72,7 +72,7 @@ class HybridSearchTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True  # safe to run concurrently with other read tools
+    parallel = True  # safe to run concurrently with other read tools
     tags = {"rag", "search"}
 
     def validate(self, raw: dict) -> dict:
@@ -159,7 +159,7 @@ class KeywordSearchTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
     tags = {"rag", "search"}
 
     def validate(self, raw: dict) -> dict:
@@ -232,7 +232,7 @@ class GraphSearchTool:
         "required": ["entity"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
     tags = {"rag", "graph"}
 
     def validate(self, raw: dict) -> dict:
@@ -299,7 +299,7 @@ class WebSearchTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
     tags = {"rag", "web"}
 
     def validate(self, raw: dict) -> dict:

@@ -13,7 +13,6 @@ class RecordingTool:
     input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     scope = "read"
     parallel = False
-    parallel_safe = False
 
     def __init__(self, content: str = "ok") -> None:
         self.inputs: list[dict[str, Any]] = []
@@ -207,7 +206,7 @@ async def test_rewritten_result_enters_provider_history() -> None:
         description = "Returns a secret."
         input_schema = {"type": "object", "properties": {}}
         scope = "read"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
             return raw

@@ -177,7 +177,7 @@ def make_sql_agent(db_schema: str) -> Agent:
         )
         input_schema = sql_output_schema.schema
         scope = "read"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw: dict) -> dict:
             return raw

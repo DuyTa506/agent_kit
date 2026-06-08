@@ -46,7 +46,7 @@ class SearchDocsTool:
         "required": ["query"],
     }
     scope = "read"
-    parallel_safe = True
+    parallel = True
 
     def validate(self, raw: dict[str, Any]) -> dict[str, Any]:
         query = raw.get("query")

@@ -157,7 +157,7 @@ async def test_live_final_tool_sql():
         )
         input_schema = sql_schema.schema
         scope = "read"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw):
             return raw
@@ -249,7 +249,7 @@ async def test_live_tool_deps():
             "required": ["key"],
         }
         scope = "read"
-        parallel_safe = True
+        parallel = True
 
         def validate(self, raw):
             if "key" not in raw:
@@ -453,7 +453,7 @@ async def test_live_run_options_deps_override():
         description = "Returns information about the current database."
         input_schema = {"type": "object", "properties": {}}
         scope = "read"
-        parallel_safe = True
+        parallel = True
 
         def validate(self, raw):
             return raw

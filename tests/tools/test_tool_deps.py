@@ -29,7 +29,7 @@ def _make_deps_captor_tool():
         description = "Captures ctx.deps for test inspection."
         input_schema: dict = {"type": "object", "properties": {}}
         scope = "read"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw: dict) -> dict:
             return raw

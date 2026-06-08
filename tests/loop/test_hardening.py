@@ -28,7 +28,7 @@ class SleepTool:
     description = "Sleep for scheduler duration testing."
     input_schema = {"type": "object", "properties": {}}
     scope = "write"
-    parallel_safe = False
+    parallel = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         return {}
@@ -46,7 +46,7 @@ async def test_permission_callback_allows_sync_and_async() -> None:
     class DummyTool:
         name = "WriteDummy"
         scope = "write"
-        parallel_safe = False
+        parallel = False
 
         def validate(self, raw: dict[str, object]) -> dict[str, object]:
             return raw

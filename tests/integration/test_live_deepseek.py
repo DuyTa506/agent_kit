@@ -99,7 +99,7 @@ async def test_deepseek_tool_use():
             "required": ["a", "b"],
         }
         scope = "read"
-        parallel_safe = True
+        parallel = True
 
         def validate(self, raw):
             return raw

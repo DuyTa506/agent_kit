@@ -89,12 +89,61 @@ def apply_context_budget(
     max_tokens = result.budget.max_tokens
     system_blocks = list(result.system_blocks)
     messages = list(result.messages)
-    used = _estimate_context_tokens(system_blocks, messages, estimator, model)
 
     if max_tokens is None:
-        result.budget.used_tokens = used
+        result.budget.used_tokens = _estimate_context_tokens(
+            system_blocks,
+            messages,
+            estimator,
+            model,
+        )
         result.budget.remaining_tokens = None
         return result
+
+    if callable(estimator):
+        return _apply_context_budget_with_estimator(
+            result,
+            system_blocks=system_blocks,
+            messages=messages,
+            estimator=estimator,
+            model=model,
+            max_tokens=max_tokens,
+        )
+
+    system_used = _estimate_text("\n".join(block.text for block in system_blocks))
+    message_costs = [_estimate_message(message) for message in messages]
+    used = system_used + sum(message_costs)
+
+    trimmed = result.budget.trimmed
+    while messages and used > max_tokens:
+        messages.pop(0)
+        used -= message_costs.pop(0)
+        trimmed = True
+
+    while system_blocks and used > max_tokens:
+        system_blocks.pop(0)
+        system_used = _estimate_text("\n".join(block.text for block in system_blocks))
+        used = system_used + sum(message_costs)
+        trimmed = True
+
+    result.system_blocks = system_blocks
+    result.messages = messages
+    result.budget.used_tokens = used
+    result.budget.remaining_tokens = max(0, max_tokens - used)
+    result.budget.trimmed = trimmed
+    return result
+
+
+def _apply_context_budget_with_estimator(
+    result: ContextBuildResult,
+    *,
+    system_blocks: list[SystemBlock],
+    messages: list[Message],
+    estimator: Any,
+    model: str,
+    max_tokens: int,
+) -> ContextBuildResult:
+    used = _estimate_context_tokens(system_blocks, messages, estimator, model)
 
     trimmed = result.budget.trimmed
     while messages and used > max_tokens:

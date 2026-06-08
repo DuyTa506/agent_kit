@@ -313,8 +313,7 @@ class MyTool:
         "required": ["query"],
     }
     scope = "read"          # "read" | "write" | "exec"
-    parallel = True         # V2 flag: can run concurrently when scope is read
-    parallel_safe = True    # legacy alias kept for existing tools
+    parallel = True         # can run concurrently when scope is read
 
     def validate(self, raw: dict) -> dict:
         if not raw.get("query"):

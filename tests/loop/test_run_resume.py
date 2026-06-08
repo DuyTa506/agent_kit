@@ -54,7 +54,6 @@ class CountingTool:
     description = "Counts executions."
     input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     parallel = False
-    parallel_safe = False
 
     def __init__(self, name: str, counts: dict[str, int], *, scope: Any = "read") -> None:
         self.name = name
@@ -269,6 +268,39 @@ async def test_resume_after_one_tool_completed_runs_only_missing_tool() -> None:
 
     assert counts == {"A": 1, "B": 1}
     assert [event.tool_name for event in events if event.type == "tool_call_end"] == ["B"]
+
+
+async def test_tool_batch_checkpoint_is_not_saved_after_each_tool_end() -> None:
+    from linch.run_store import InMemoryRunStore
+
+    class CountingRunStore(InMemoryRunStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saved_phases: list[str] = []
+
+        async def save_checkpoint(self, run_id, checkpoint, *, status="running"):
+            self.saved_phases.append(checkpoint.phase)
+            return await super().save_checkpoint(run_id, checkpoint, status=status)
+
+    session_store = _memory_session_store()
+    run_store = CountingRunStore()
+    counts: dict[str, int] = {}
+    agent = _agent(
+        model="gpt-5",
+        provider=ScriptProvider(tool_names=["A", "B"]),
+        tools=_registry(counts, "A", "B"),
+        permissions={"mode": "skip-dangerous"},
+        session_store=session_store,
+        run_store=run_store,
+        cwd=".",
+    )
+    session = await agent.session(id="s1")
+
+    events = await _collect(session.run("use tools"))
+
+    assert events[-1].type == "result"
+    assert counts == {"A": 1, "B": 1}
+    assert run_store.saved_phases.count("tool_batch_pending") == 1
 
 
 async def test_permission_pending_resume_reemits_before_tool_execution() -> None:

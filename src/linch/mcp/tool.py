@@ -50,7 +50,7 @@ def make_mcp_tool(
 
     class _McpTool:
         scope = "read" if read_only else "write"
-        parallel_safe = read_only
+        parallel = read_only
 
         def __init__(self) -> None:
             self.name = name

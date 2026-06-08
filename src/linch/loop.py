@@ -414,10 +414,10 @@ async def stream_turn(
     session: Session, req: ProviderRequest
 ) -> AsyncIterator[PartialAssistantEvent | AssistantAssembly]:
     agent = session.agent
-    text_buf = ""
-    thinking_buf = ""
+    text_buf: list[str] = []
+    thinking_buf: list[str] = []
     thinking_sig: str | None = None
-    tool_inputs: dict[str, str] = {}
+    tool_inputs: dict[str, list[str]] = {}
     tool_meta: dict[str, tuple[str, str]] = {}
     content: list[ContentBlock] = []
     stop_reason: StopReason = "end_turn"
@@ -427,14 +427,14 @@ async def stream_turn(
     def flush_text() -> None:
         nonlocal text_buf
         if text_buf:
-            content.append(TextBlock(text=text_buf))
-            text_buf = ""
+            content.append(TextBlock(text="".join(text_buf)))
+            text_buf = []
 
     def flush_thinking() -> None:
         nonlocal thinking_buf, thinking_sig
         if thinking_buf:
-            content.append(ThinkingBlock(thinking=thinking_buf, signature=thinking_sig))
-            thinking_buf = ""
+            content.append(ThinkingBlock(thinking="".join(thinking_buf), signature=thinking_sig))
+            thinking_buf = []
             thinking_sig = None
 
     async for event in agent.provider.stream(req):
@@ -442,13 +442,13 @@ async def stream_turn(
         if typ == "text_delta":
             flush_thinking()
             text = str(event["text"])
-            text_buf += text
+            text_buf.append(text)
             if agent.include_partial_messages:
                 yield PartialAssistantEvent(delta={"kind": "text", "text": text})
         elif typ == "thinking_delta":
             flush_text()
             text = str(event["text"])
-            thinking_buf += text
+            thinking_buf.append(text)
             signature = event.get("signature", thinking_sig)
             thinking_sig = signature if isinstance(signature, str) else thinking_sig
             if agent.include_partial_messages:
@@ -458,11 +458,11 @@ async def stream_turn(
             flush_thinking()
             tool_id = str(event["id"])
             tool_meta[tool_id] = (tool_id, str(event["name"]))
-            tool_inputs[tool_id] = ""
+            tool_inputs[tool_id] = []
         elif typ == "tool_use_input_delta":
             tool_id = str(event["id"])
             json_delta = str(event["json_delta"])
-            tool_inputs[tool_id] = tool_inputs.get(tool_id, "") + json_delta
+            tool_inputs.setdefault(tool_id, []).append(json_delta)
             if agent.include_partial_messages:
                 yield PartialAssistantEvent(
                     delta={
@@ -474,7 +474,7 @@ async def stream_turn(
         elif typ == "tool_use_end":
             tool_id = str(event["id"])
             meta = tool_meta.pop(tool_id, None)
-            raw = tool_inputs.pop(tool_id, "")
+            raw = "".join(tool_inputs.pop(tool_id, []))
             if meta is not None:
                 try:
                     parsed = json.loads(raw) if raw else {}
@@ -1070,14 +1070,6 @@ async def _run_loop_impl(
                 if isinstance(event, ToolCallEndEvent):
                     block = _tool_result_block_from_end(event)
                     completed_tool_results[event.tool_use_id] = block
-                    await _save_checkpoint(
-                        "tool_batch_pending",
-                        turn_index=turn_index,
-                        assistant_message=assembly.message,
-                        assistant_stop_reason=assembly.stop_reason,
-                        pending_tool_blocks=tool_blocks,
-                        completed_tool_results=completed_tool_results,
-                    )
             result_blocks: list[ContentBlock] = [
                 completed_tool_results[block.id] for block in tool_blocks
             ]

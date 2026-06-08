@@ -18,7 +18,6 @@ class BigTool:
     description = "Returns a large result."
     input_schema = {"type": "object", "properties": {}}
     scope = "read"
-    parallel_safe = True
     parallel = True
 
     def validate(self, raw: dict) -> dict:

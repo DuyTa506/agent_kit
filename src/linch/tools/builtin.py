@@ -45,7 +45,6 @@ class ReadTool:
     }
     scope: ToolScope = "read"
     parallel: bool = True
-    parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         file_path = raw.get("file_path")
@@ -107,7 +106,6 @@ class WriteTool:
     }
     scope: ToolScope = "write"
     parallel: bool = False
-    parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         file_path = raw.get("file_path")
@@ -156,7 +154,6 @@ class EditTool:
     }
     scope: ToolScope = "write"
     parallel: bool = False
-    parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         file_path = raw.get("file_path")
@@ -238,7 +235,6 @@ class BashTool:
     }
     scope: ToolScope = "exec"
     parallel: bool = False
-    parallel_safe: bool = False
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         timeout = raw.get("timeout_ms", 120000)
@@ -578,7 +574,6 @@ class GrepTool:
     }
     scope: ToolScope = "read"
     parallel: bool = True
-    parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         pattern = require_str(raw, "pattern")
@@ -726,7 +721,6 @@ class GlobTool:
     }
     scope: ToolScope = "read"
     parallel: bool = True
-    parallel_safe: bool = True
 
     def validate(self, raw: dict[str, object]) -> dict[str, object]:
         pattern = raw.get("glob_pattern")
