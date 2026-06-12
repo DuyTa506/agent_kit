@@ -582,6 +582,15 @@ this track makes them explicit guarantees.
 - **No global state / multi-tenancy / cancellation** — audit for process-global state so N
   agents run in one host process safely; verify `session.abort()`/`agent.close()` fully
   drain tasks (the `_cancel_background_workers` guarantees) under concurrency.
+  - **Status (done):** audit found no process-global mutable state — every `Agent` builds its
+    own tool registry, sessions dict, permission engine, and extension state; the one
+    module-level singleton (`default_compaction`) is immutable. `tests/test_multitenancy.py`
+    pins it: three agents run concurrently with disjoint sessions and no cross-talk. The
+    audit also surfaced a real **cancellation leak** — `agent.close()` cancelled subagent
+    workers but not detached background-*tool* tasks (`session.background_tasks`); now fixed
+    to mirror `session.abort()`, and the test proves closing agent A drains A's worker while
+    agent B's stays live. YAGNI-deferred: no tenant-id namespacing or per-tenant quota (the
+    embedder owns multi-tenant routing; Linch just stays isolated).
 - **Versioned serialization/resume** — treat `RunCheckpoint`/stored-event formats as a
   stable, versioned contract with forward-compat handling.
   - **Status (done):** `run_store.SCHEMA_VERSION` (exported as `linch.RUN_SCHEMA_VERSION`)
