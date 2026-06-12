@@ -182,6 +182,30 @@ Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contain
   guardrails (`TEXT ONLY, no tools`, `<analysis>`/`<summary>` tags).
 - **Verify:** after a forced compaction, recent tool results survive in `provider_view`;
   the memory rung makes zero provider calls when memory suffices.
+- **Status: done (scoped to the one real gap).** Audited against the existing ladder and
+  found most of this sub-item already shipped, so — per YAGNI/KISS — only the genuine gap
+  was built:
+  - **Post-compaction read-tracker reset (new).** A compaction (micro elision *or* forced
+    summary) can remove a file's contents from `provider_view` while
+    `session.file_read_tracker` still records it as read; the `Edit` tool gates on
+    `has_read`, so a stale entry would permit a *blind* edit on content the model can no
+    longer see. `reset_read_tracker_after_compaction` (`compaction.py`) clears the tracker
+    after a compaction, gated on `CompactionLadder(reset_read_tracker=True)` (ladder
+    default). Wired at the proactive (`loop/runner.py`) and reactive (`loop/streaming.py`
+    ladder path) chokepoints; the legacy non-ladder path is intentionally left untouched so
+    defaults stay byte-identical. This is the domain-agnostic generalization of the
+    reference's "re-read files after compaction" — keyed off the core `file_read_tracker`,
+    not a coding assumption. (3 unit + 3 integration tests.)
+  - **Already present (not rebuilt):** recent tool results already survive forced
+    compaction (`DefaultCompaction`/`DetailedCompaction` keep the last *N* turns verbatim);
+    the proactive trigger is already a token threshold (`estimate + reserve ≥ 0.8·limit`);
+    the detailed-summary guardrails (`TEXT ONLY`, `<analysis>`/`<summary>`) already live in
+    `_DETAILED_SUMMARY_PROMPT`.
+  - **Deferred as speculative (YAGNI):** the `sessionMemoryCompact` rung (an LLM-free
+    summary sourced from `MemoryStore`) and a separate COW "snip" rung — `micro_compact`
+    already covers LLM-free tool-result reduction, and a memory-sourced summary needs a
+    concrete embedder use case before it earns its complexity. Revisit if a real need
+    surfaces.
 
 #### 1.3 Output-truncation & model-fallback recovery — *mechanism*
 - **Why:** `loop/streaming.py` recovers from `context_length_error` but not output
