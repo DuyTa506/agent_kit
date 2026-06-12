@@ -73,11 +73,15 @@ assembled by a preset (`deep_agent`) or the embedder, not the core loop.
    `ScorerVerifier`. *Verify:* a workflow step failing its scorer surfaces a typed failure;
    a deep-agent run and a workflow run charge the same shared `RunBudget`.
 2. **Graduate the open loop from "experimental."** `create_deep_agent` is open by nature,
-   so its safety rails are the difference between "runnable" and "slop machine" — ship it
-   with **budget + verification + `loop_guard` wired ON by default** (still overridable),
-   and make Phase 1.4 + Phase 2 coordination primitives its foundation. *Verify:* a default
-   `create_deep_agent` halts on budget exhaustion and runs its verifier gate before
-   shipping a final answer.
+   so its safety rails are the difference between "runnable" and "slop machine." But a
+   *default budget number* is an arbitrary cost guess and a *default verifier* is a domain
+   quality standard — both are policy a pure-mechanism SDK must not own (and forcing them
+   would break "default byte-identical"). So instead of fabricating defaults, make the
+   rails **first-class and discoverable**: `loop_guard` stays on by default (a domain-
+   agnostic mechanism); `budget=`, `verifiers=` (auto-wrapped into the hooks layer),
+   `max_verification_retries=`, and `max_turns=` are explicit, documented parameters on
+   `create_deep_agent`, with an "Open-loop safety rails" docstring telling the embedder to
+   set them. *(Done — `deep_agent/factory.py`.)*
 3. **Keep `run_workflow` the closed-loop reference.** Its journaling/resume + deterministic
    replay are the "cheap, repeatable, gets better every run" guarantees — protect them as a
    versioned contract (ties into Phase 5 serialization hardening).
@@ -201,6 +205,11 @@ Pure runtime mechanisms; no new subsystems. Highest leverage, fully self-contain
   embedder's choreography.
 - **Verify:** two concurrent claims on one task → exactly one wins; completing an upstream
   task moves dependents into `ready_tasks`; killing an owner releases its tasks.
+- **Status:** the store *verbs* (`claim_task`/`ready_tasks`/`release_task`) are **done**
+  across all three `SessionStore` backends + protocol (7 parametrized tests). The
+  *auto-release-on-worker-death wiring* is deferred to Phase 2.3 — it needs the
+  `owner == worker_id` convention the autonomous board establishes; wiring it before then
+  would be dead code (nothing claims tasks by worker id yet).
 
 ---
 
