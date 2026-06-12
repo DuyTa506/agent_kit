@@ -571,6 +571,14 @@ this track makes them explicit guarantees.
 
 - **Curated public API + semver** — an explicit `__all__`/public-surface contract and a
   versioning policy embedders can pin to; mark internal modules clearly.
+  - **Status (done):** `tests/test_public_api.py` locks the surface — every `__all__` name
+    resolves, no duplicates, and no public (non-underscore) attribute leaks onto the package
+    undeclared (submodules excluded). `get_version` promoted into `__all__`. `docs/versioning.md`
+    is the semver contract: public = `linch.__all__` (top-level imports only), submodule
+    paths/underscore names are private, wire formats version independently via
+    `RUN_SCHEMA_VERSION`, plus MAJOR/MINOR/PATCH rules for protocols and a deprecation policy.
+    YAGNI-deferred: no per-name `@public`/`@internal` decorators or a generated API-reference
+    site (the `__all__` snapshot + guard test is the contract).
 - **No global state / multi-tenancy / cancellation** — audit for process-global state so N
   agents run in one host process safely; verify `session.abort()`/`agent.close()` fully
   drain tasks (the `_cancel_background_workers` guarantees) under concurrency.
