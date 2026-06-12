@@ -280,6 +280,19 @@ team protocols, coding fleets). No domain policy in core.
   primitive — *not* specific protocols (shutdown/plan-approval are embedder choreography).
 - **Verify:** worker A → worker B message is visible on B's next turn; concurrent writes to
   one inbox don't drop messages; the correlation helper matches a response to its request.
+- **Status:** done (in-process substrate). `mailbox/` ships `Mailbox` protocol +
+  `InMemoryMailbox` (per-recipient FIFO, async-lock guarded so concurrent sends never drop;
+  destructive/atomic `drain`), `MailboxMessage` (neutral `type` + `request_id`/`in_reply_to`),
+  and a non-blocking `Correlator` (pending→resolved FSM — a turn-based agent polls across
+  turns rather than blocking its turn). `Agent(mailbox=...)` auto-registers the
+  `send_message` tool; the loop drains a session's `mailbox_address` into `provider_view`
+  each turn at the same chokepoint as `pending_notifications` (so parent and workers are
+  served uniformly — workers default `mailbox_address` to their display_name). Opt-in:
+  no mailbox → no tool, no drain (byte-identical). **Deferred (YAGNI):** durable
+  `SqliteMailbox`/`FileMailbox` adapters — the live drain is in-process (workers are
+  `agent._sessions`), so durability is an embedder concern reachable through the same
+  protocol, mirroring the app-owned `MemoryStore`/`SessionStore` pattern. Add when a
+  cross-process delivery need is concrete.
 
 #### 2.2 Generic filesystem isolation backend — *seam (generalizes worktrees)*
 - **Why:** parallel subagents share one cwd — real-disk edit collisions are unaddressed.
