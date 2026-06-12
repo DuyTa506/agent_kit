@@ -308,6 +308,18 @@ team protocols, coding fleets). No domain policy in core.
 - **Verify:** two parallel subagents writing the same relative path under
   `TempDirIsolation` don't collide; `keep=False` cleans up; a custom backend slots in via
   the protocol.
+- **Status:** done for `run_subagent`. `tools/isolation.py` ships the `IsolationBackend`
+  protocol + `TempDirIsolation` (fresh scratch dir per `acquire`, optional `source` seed
+  copy, blocking fs work off-loop via `asyncio.to_thread`). `RunSubagentArgs` gains
+  `isolation` + `isolation_keep`; the child runs under an acquired cwd via the new
+  `Session.cwd_override`, released in the `finally` (leak-safe — acquired inside the try).
+  The scheduler routes execution **and** permission path-rule matching through
+  `_effective_cwd(session, agent)` (override → `agent.cwd`), so isolation is honored at all
+  three cwd sites. Git-worktree stays an embedder impl of the protocol; the two-tier
+  guidance (`ResourceAccess` vs isolation) is in the module docstring. Opt-in: no
+  `isolation` → child uses `agent.cwd` (byte-identical). **Deferred:** `wf.agent(isolation=)`
+  pass-through (next slice — `wf.agent` already funnels through `run_subagent`, so it's a
+  thin thread-through).
 
 #### 2.3 Background-any-tool — *mechanism (generalizes background bash)*
 - **Why:** background execution is hard-wired to the subagent path; the substrate
