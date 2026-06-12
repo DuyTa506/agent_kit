@@ -523,6 +523,24 @@ Small, high-confidence additions that complete the pure-SDK extension contract.
   tiers. Defer OAuth/PKCE and reverse channels (YAGNI).
 - **Verify:** a server connected mid-run is callable next turn; a `destructive` MCP tool
   triggers a permission prompt.
+- **Status (done):** Mid-run registration needed no cache-busting — `loop/request.py`'s
+  `_select_context_tools` already rebuilds the tool list from `session.tools_override or
+  agent.tools` every turn, so tools added to the live registry appear on the next turn. New
+  `Agent.add_mcp_servers(servers)` connects additional servers during a run and routes
+  through the extracted `Agent._attach_mcp_tools(connection)` helper (shared with the
+  configured-connect path — DRY), which registers the tools, applies the permission bridge,
+  refreshes system blocks, and tracks the connection so `close()` shuts it down too.
+  Annotation→permission bridge: `make_mcp_tool` already mapped `readOnlyHint` → read scope
+  (auto-allow + parallel); it now also stamps a `destructive` flag from `destructiveHint`.
+  The mcp-free `mcp/permission_bridge.py::mcp_permission_rules(tools)` maps each destructive
+  tool to a `ToolRule(name, "ask")`, which (evaluated before mode default) forces a prompt
+  even under `skip-dangerous`/`acceptEdits`, where a plain write tool would auto-allow.
+  Default byte-identical: MCP is opt-in, and a destructive tool was already write-scoped
+  (so it asked under the default mode anyway); the bridge only adds the prompt under
+  permissive modes. Deferrals (YAGNI): OAuth/PKCE and reverse channels not implemented;
+  read-only tools get no explicit `allow` rule (their read scope already auto-allows — a
+  redundant rule would be noise); the `Agent`/permissions config still does not auto-merge
+  named permission sources (see 4.2 deferral).
 
 #### 4.4 Input-aware concurrency seam *(Low)*
 - **Where:** tool protocol, `scheduler._tool_parallel`.
